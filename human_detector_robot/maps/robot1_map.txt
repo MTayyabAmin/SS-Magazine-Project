@@ -1,0 +1,57 @@
+================================================================================
+  ARK-5 2D TENTATIVE MAP — ROBOT #1
+  Legend: S=start  .=robot path  @=current robot  #=wall  *=human detected
+  Current Pose: X=-11.2 cm, Y=11.2 cm, Heading=+135.0° (MPU)
+  Total Traveled: 15.8 cm | Humans Found: 7
+  Updated: 2026-09-19 14:35:43
+================================================================================
+
+# Human Detections & Critical Events:
+# [14:35:12] HUMAN (cv_standing) at (X=-4.4cm, Y=4.4cm) [CV] HUMAN STANDING detected (conf=0.51)
+# [14:35:17] HUMAN (cv_standing) at (X=-8.9cm, Y=8.9cm) [CV] HUMAN STANDING detected (conf=0.54)
+# [14:35:22] HUMAN (cv_standing) at (X=-11.2cm, Y=11.2cm) [CV] HUMAN STANDING detected (conf=0.56)
+# [14:35:27] HUMAN (wifi) at (X=-11.2cm, Y=11.2cm) HUMAN_POSSIBLE_BEHIND_WALL
+# [14:35:32] HUMAN (wifi) at (X=-11.2cm, Y=11.2cm) HUMAN_POSSIBLE_BEHIND_WALL
+# [14:35:37] HUMAN (wifi) at (X=-11.2cm, Y=11.2cm) HUMAN_POSSIBLE_BEHIND_WALL
+# [14:35:42] HUMAN (cv_fallen) at (X=-11.2cm, Y=11.2cm) [CV] HUMAN FALLEN detected (conf=0.55)
+
+   #
+
+
+
+
+
+
+
+
+
+
+              #
+               #
+                #
+
+
+
+                    #
+                     #
+                      #
+                       #
+                        #
+                         #
+                          #
+                           #
+                            #
+                             #
+
+
+                                #
+                                 #
+                                  #
+                                   #
+                                    #
+
+                                      @
+                                       *
+                                        S
+
+

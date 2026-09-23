@@ -1,0 +1,90 @@
+# ARK-5 Human Detector Robot — Main Configuration
+# ESP32-CAM stream + robot ESP32 dono router se connected hain.
+
+# Multi-Robot Configuration (2 Identical Robots)
+# Usage: python main_controller.py --robot 1 (or --robot 2)
+active_robot: 1
+
+robots:
+  1:
+    name: "Robot_Alpha"
+    udp_host: "192.168.137.11"
+    udp_port: 4210
+    telemetry_port: 4211
+    stream_url: "http://192.168.137.10:81/stream"
+    map_file: "maps/robot1_map.txt"
+    trajectory_log: "maps/robot1_movement_log.txt"
+  2:
+    name: "Robot_Beta"
+    udp_host: "192.168.137.21"
+    udp_port: 4220
+    telemetry_port: 4221
+    stream_url: "http://192.168.137.20:81/stream"
+    map_file: "maps/robot2_map.txt"
+    trajectory_log: "maps/robot2_movement_log.txt"
+
+camera:
+  # Fallback default stream URL (Robot 1)
+  stream_url: "http://192.168.137.10:81/stream"
+  width: 640
+  height: 480
+
+robot:
+  # Fallback default robot settings
+  udp_host: "192.168.137.11"
+  udp_port: 4210
+  telemetry_port: 4211
+  command_rate_hz: 20
+  wall_stop_cm: 100
+  telemetry_timeout_s: 1.5
+
+yolo:
+  # YOLO11 — Ultralytics flagship model (Sep 2024), YOLOv8 se better accuracy + fewer params
+  # CPU real-time ke liye: yolo11n.pt (2.6M params, 39.5 mAP)  ← DEFAULT
+  # GPU / high accuracy ke liye: yolo11x.pt (56.9M params, 54.7 mAP)
+  # Custom trained model ke liye:
+  #   weights: best.pt
+  #   custom_model: true
+  weights: yolo11n.pt
+  custom_model: false
+  conf: 0.4
+  iou: 0.45
+  imgsz: 640
+  # FIX: har frame par YOLO chalane se FPS gir jata hai (CPU par slow).
+  # Har N-wan frame par hi naya detection chalao, beech ke frames mein
+  # purana result dikhao. 1 = har frame (purana behavior), 2-3 = zyada
+  # tez lekin thora "delayed" detection.
+  infer_every_n_frames: 2
+  # FIX: pehle ye thresholds main_controller.py mein hardcoded (0.4/0.5/0.55)
+  # the aur yahan ke `conf` se match nahi karte the. Ab sab yahin se aate hain.
+  fallen_conf: 0.4
+  standing_conf: 0.5
+  person_conf: 0.55
+
+posture:
+  # Bbox height/width ratio thresholds (custom model na ho to fallback)
+  standing_ratio_min: 1.2
+  fallen_ratio_max: 0.85
+
+wifi_sensing:
+  rssi_drop_threshold_dbm: 8.0
+
+control:
+  v_cruise: 0.15
+  v_creep: 0.06              # slow forward to 30-40cm scan standoff
+  omega_scan: 0.35            # smooth L-turn rotation speed
+  scan_standoff_min_cm: 30    # min distance from wall when scanning
+  scan_standoff_max_cm: 40    # max distance from wall when scanning
+  open_path_cm: 120           # sonar reading = open route found
+  scan_step_deg: 15           # sample sonar every N degrees while robot rotates
+  scan_side_deg: 90           # scan 90° LEFT + 90° RIGHT (T-junction both sides)
+  alert_pause_s: 2.0          # pause after human detect, then continue
+  show_preview: true
+
+map:
+  enabled: true
+  file: maps/tentative_map.txt
+  trajectory_log: maps/robot_movement_log.txt
+  cell_size_m: 0.05           # 5cm per character
+  width: 80
+  height: 40

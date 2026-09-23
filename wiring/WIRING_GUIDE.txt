@@ -1,0 +1,419 @@
+=============================================================================
+              ARK-5 HUMAN DETECTOR ROBOT — COMPLETE WIRING GUIDE
+=============================================================================
+
+Project: Autonomous human detection robot (CV + WiFi sensing + Ultrasonic)
+Laptop = brain (YOLOv8). ESP32-CAM = video stream only. ESP32 DevKit = motors/IMU/sensors.
+
+=============================================================================
+SECTION 0: PARTS LIST
+=============================================================================
+| # | Part                    | Role                                      |
+|---|-------------------------|-------------------------------------------|
+| 1 | ESP32 DevKit (WROOM-32) | Robot: motors, MPU6050, ultrasonic, WiFi |
+| 2 | ESP32-CAM OV3660        | Video stream to laptop via router         |
+| 3 | FTDI USB adapter        | Flash ESP32-CAM only (5V/GND/TX/RX/GPIO0) |
+| 4 | MPU6050 module          | Heading / dead-reckoning (no GPS)         |
+| 5 | L298N motor driver      | 2x DC TT motor control                    |
+| 6 | 2x TT gear motors       | Left + right drive wheels                 |
+| 7 | HC-SR04 ultrasonic      | Wall/obstacle stop @ 1 meter              |
+| 8 | 2S/3S LiPo battery      | 7.4V–11.1V motor power                    |
+| 9 | WiFi router (2.4 GHz)   | ESP32-CAM + robot ESP32 + laptop same LAN |
+|10 | Laptop                  | YOLOv8 inference + autonomous controller  |
+
+=============================================================================
+SECTION 0A: DO ALAG BOARDS — ESP32 DevKit AUR ESP32-CAM JUDE NAHI
+=============================================================================
+
+*** SAB SE IMPORTANT — PEHLE YEH SAMJHO ***
+
+Tumhare paas DO alag devices hain. In ke beech KOI wire nahi lagani:
+
+  ┌─────────────────────┐          ┌─────────────────────┐
+  │  ESP32 DevKit       │          │  ESP32-CAM OV3660   │
+  │  (jo tumne photo    │   NO     │  (alag board)       │
+  │   mein dikhaya)     │◄─WIRE──►│                     │
+  │                     │  XXXX    │                     │
+  │  Motors, MPU,       │          │  Sirf camera + WiFi │
+  │  Ultrasonic yahan   │          │  Video stream yahan │
+  └─────────┬───────────┘          └─────────┬───────────┘
+            │                                │
+            └──────────┬─────────────────────┘
+                       │  WiFi (Router)
+                       ▼
+                  ┌─────────┐
+                  │ Laptop  │
+                  └─────────┘
+
+Dono boards sirf ROUTER ke zariye laptop se baat karti hain — aapas mein wired
+connection bilkul nahi chahiye.
+
+=============================================================================
+SECTION 0B: TUMHARI ESP32 DevKit (Photo wali) — Micro-USB
+=============================================================================
+
+Jo board tumne photo mein dikhayi hai = ESP32 DevKit V1 (WROOM-32):
+
+  • Is par pehle se Micro-USB port hai (CP2102/CH340 chip onboard)
+  • Is ke liye FTDI adapter KI ZAROORAT NAHI
+  • Laptop se seedha Micro-USB cable lagao → Arduino IDE se code flash karo
+  • Runtime par bhi USB optional hai (battery se chal sakti hai)
+
+Tumhari board ke pins (PCB par likhe hue) — hamare project se match:
+
+  | Project use      | DevKit pin label |
+  |------------------|------------------|
+  | MPU SDA          | D21 (GPIO 21)    |
+  | MPU SCL          | D22 (GPIO 22)    |
+  | Motor ENA        | D25 (GPIO 25)    |
+  | Motor IN1        | D26 (GPIO 26)    |
+  | Motor IN2        | D27 (GPIO 27)    |
+  | Motor ENB        | D33 (GPIO 33)    |
+  | Motor IN3        | D32 (GPIO 32)    |
+  | Motor IN4        | D14 (GPIO 14)    |
+  | Ultrasonic TRIG  | D18 (GPIO 18)    |
+  | Ultrasonic ECHO  | D19 (GPIO 19)    |
+  | Power            | 3V3, GND, VIN    |
+
+Is board par lagao: MPU6050 + L298N + Motors + HC-SR04 + Battery
+Is board par NA lagao: ESP32-CAM, FTDI
+
+=============================================================================
+SECTION 0C: ESP32-CAM + FTDI — Kab lagana, kab hataana
+=============================================================================
+
+ESP32-CAM par USB port NAHI hota — is liye flash ke liye FTDI chahiye.
+
+FTDI sirf PROGRAMMING (flash) ke waqt lagta hai:
+
+  FTDI USB          ESP32-CAM
+  +--------+        +------------------+
+  |    5V  +--------+ 5V               |
+  |   GND  +--------+ GND              |
+  |    TX  +--------+ U0R (RX)         |   ← FTDI TX → CAM RX
+  |    RX  +--------+ U0T (TX)         |   ← FTDI RX → CAM TX
+  +--------+        | GPIO 0 --- GND   |   ← flash mode (sirf upload ke waqt)
+
+*** FLASH KE BAAD FTDI HATA DO ***
+
+  Step 1 — Flash karte waqt:
+    • FTDI se ESP32-CAM ko laptop se connect karo
+    • GPIO 0 ko GND se jodo (BOOT mode)
+    • EN/Reset dabao
+    • Arduino IDE se camera_stream.ino upload karo
+
+  Step 2 — Flash complete hone ke baad:
+    • GPIO 0 aur GND ke beech ka wire HATA do
+    • FTDI USB cable HATA do (poora FTDI alag rakho)
+    • ESP32-CAM ko alag 5V power do (FTDI ki 5V se chal sakta hai testing ke
+      liye, lekin robot par stable 5V supply use karo)
+    • ESP32-CAM khud router se connect hogi aur video stream degi
+
+  Runtime par ESP32-CAM completely STANDALONE hai:
+    • FTDI connected NAHI rehna chahiye
+    • ESP32 DevKit se koi wire NAHI
+    • Sirf: 5V power + WiFi → router → laptop stream
+
+Summary:
+  | Device        | Laptop se kaise?        | Runtime par kya connected?      |
+  |---------------|-------------------------|----------------------------------|
+  | ESP32 DevKit  | Micro-USB (built-in)    | Battery + sensors + motors       |
+  | ESP32-CAM     | FTDI (flash ONLY)       | Sirf 5V power — FTDI hata do     |
+
+=============================================================================
+SECTION 0: PARTS LIST (continued)
+=============================================================================
+
+                    ┌─────────────────┐
+                    │  WiFi Router    │
+                    │  (2.4 GHz)      │
+                    └───┬──────┬──────┘
+                        │      │
+           ┌────────────┘      └────────────┐
+           │                                 │
+    ┌──────▼──────┐                  ┌───────▼───────┐
+    │   Laptop    │                  │ ESP32-CAM     │
+    │  YOLOv8 CV  │◄── MJPEG HTTP ───│ OV3660        │
+    │  Controller │                  │ (STA mode)    │
+    └──────┬──────┘                  └───────────────┘
+           │ UDP 4210/4211
+           │
+    ┌──────▼──────────────────────────────────────┐
+    │  ESP32 DevKit (Robot Controller)            │
+    │  • STA → router (commands + telemetry)      │
+    │  • SoftAP "HumanSense" → WiFi human detect  │
+    │  • MPU6050 + Ultrasonic + L298N motors      │
+    └─────────────────────────────────────────────┘
+
+Notes:
+- ESP32-CAM sirf video stream karta hai — koi AI ESP par nahi chalti.
+- Robot ESP32 router se laptop se baat karta hai (UDP).
+- Robot ESP32 ka alag SoftAP "HumanSense" sirf wall ke peeche human sensing ke liye.
+- Sab devices EK hi router par hon (same SSID/password).
+
+Default credentials (config.h / project.yaml mein change karo):
+  Router SSID     : YourHomeWiFi
+  Router Password : YourPassword
+  HumanSense AP   : HumanSense / humansense123
+  ESP32-CAM stream: http://<cam-ip>:81/stream
+
+=============================================================================
+SECTION 2: ESP32 DevKit ↔ MPU6050 (I2C)
+=============================================================================
+
+      ESP32 DevKit                          MPU6050
+  +----------------+                    +-----------+
+  |           3.3V +--------------------+ VCC       |
+  |            GND +---------+----------+ GND       |
+  |                |         |          |           |
+  |        GPIO 22 +---------|----------+ SCL       |
+  |        GPIO 21 +---------|----------+ SDA       |
+  +----------------+         |          | AD0       +--- GND (address 0x68)
+                             |          +-----------+
+                             +--- Common GND
+
+Notes:
+- MPU6050 ko 3.3V par power karo, 5V direct mat lagao.
+- SDA/SCL wires chote rakho, motor wires se door.
+
+=============================================================================
+SECTION 3: ESP32 DevKit ↔ L298N ↔ MOTORS
+=============================================================================
+
+      ESP32 DevKit                         L298N                    MOTORS
+  +----------------+                 +---------------+
+  |        GPIO 25 +-----------------+ ENA (PWM A)   |
+  |        GPIO 26 +-----------------+ IN1           +---- LEFT MOTOR
+  |        GPIO 27 +-----------------+ IN2           |
+  |        GPIO 33 +-----------------+ ENB (PWM B)   |
+  |        GPIO 32 +-----------------+ IN3           +---- RIGHT MOTOR
+  |        GPIO 14 +-----------------+ IN4           |
+  +----------------+                 +---------------+
+
+Notes:
+- L298N ke ENA/ENB jumpers HATA do — PWM ESP32 se aata hai.
+- Motor ulta ghoomay to us motor ke 2 wires swap karo.
+- Wheel base: 20 cm | Wheel radius: 3.3 cm (66 mm TT wheels)
+
+=============================================================================
+SECTION 4: HC-SR04 x2 — POWER, DIVIDER, WIRING (READ CAREFULLY)
+=============================================================================
+
+*** ESP32 GPIO 3.3V hai — lekin HC-SR04 ko 3.3V se power NAHI dena (ideal) ***
+
+KYUN?
+  • ESP32 ke 3.3V pin se TRIG signal bhejna THEEK hai (logic input)
+  • HC-SR04 ka VCC (power) 5V maangta hai — 3.3V par range kam / unreliable
+  • ECHO pin SENSOR se 5V pulse OUTPUT karti hai → ESP32 GPIO ko 3.3V chahiye
+    Is liye divider sirf ECHO par — VCC par nahi!
+
+VCC kahan se?
+  → L298N ki 5V output (4700uF cap ke baad) — dono HC-SR04 ka VCC yahi
+
+GND?
+  → Common GND (ESP32 + L298N + dono sensors)
+
+─────────────────────────────────────────────────────────────────────────────
+SENSOR #1 — FRONT (samne, cruise wall stop)
+─────────────────────────────────────────────────────────────────────────────
+  L298N 5V ──────── HC-SR04 #1 VCC
+  GND    ──────── HC-SR04 #1 GND
+  GPIO18 ──────── TRIG
+  GPIO19 ──────── ECHO (divider ke through — neeche dekho)
+
+─────────────────────────────────────────────────────────────────────────────
+SENSOR #2 — LEFT (90° left mount, T-junction left path)
+─────────────────────────────────────────────────────────────────────────────
+  L298N 5V ──────── HC-SR04 #2 VCC
+  GND    ──────── HC-SR04 #2 GND
+  GPIO 5 (D5)  ──────── TRIG
+  GPIO15 (D15) ──────── ECHO (divider ke through)
+
+  (Agar RIGHT mount chahiye LEFT ki jagah: GPIO16 TRIG, GPIO4 ECHO)
+
+─────────────────────────────────────────────────────────────────────────────
+ECHO VOLTAGE DIVIDER (har sensor par — sirf ECHO line par!)
+─────────────────────────────────────────────────────────────────────────────
+
+  HC-SR04 ECHO (5V) ──[ 1kΩ ]──┬── GPIO (19 / 17 / 4)
+                               │
+                             [ 2kΩ ]
+                               │
+                              GND
+
+  5V × 2k/(1k+2k) ≈ 3.3V → ESP32 safe
+
+  Agar tumhara module "3.3V compatible" likha ho AUR ECHO 3.3V measure ho
+  multimeter se → divider optional. Standard blue HC-SR04 par divider lagao.
+
+  TRIG par divider NAHI — ESP32 3.3V TRIG ko sensor accept karta hai.
+
+─────────────────────────────────────────────────────────────────────────────
+2 SENSORS — tum kaun se wire karo?
+─────────────────────────────────────────────────────────────────────────────
+
+  Setup A (recommended):  FRONT + LEFT
+    • Aage wall detect + T par left seedha
+    • Right path = robot rotate (servo NAHI)
+
+  Setup B:              FRONT + RIGHT
+    • Same, mirror — right seedha, left rotate se
+
+  Setup C:              LEFT + RIGHT (dono side)
+    • T-junction dono taraf seedha scan
+    • Cruise ke liye FRONT zaroori — is setup mein samne wall
+      detect kamzor — Setup A behtar
+
+Mounting:
+  • FRONT: robot ke samne, zameen se ~15cm upar
+  • LEFT:  robot ke left side, 90° left point kare
+  • Dono VCC 5V parallel L298N se (thick wire)
+
+=============================================================================
+SECTION 4B: PIN TABLE (HC-SR04 x2)
+=============================================================================
+| Sensor | VCC  | GND | TRIG   | ECHO (+ divider) |
+|--------|------|-----|--------|------------------|
+| FRONT  | 5V   | GND | GPIO18 | GPIO19           |
+| LEFT   | 5V   | GND | GPIO 5 (D5)  | GPIO15 (D15)     |
+| RIGHT* | 5V   | GND | GPIO16 | GPIO 4           |
+
+* RIGHT optional — 2 sensors ho to FRONT+LEFT wire karo
+
+=============================================================================
+SECTION 5: ESP32-CAM OV3660 ↔ FTDI (FLASHING ONLY)
+=============================================================================
+
+  FTDI USB          ESP32-CAM (programming)
+  +--------+        +------------------+
+  |    5V  +--------+ 5V               |
+  |   GND  +--------+ GND              |
+  |    TX  +--------+ U0R (RX)         |
+  |    RX  +--------+ U0T (TX)         |
+  |        |        | GPIO 0 --- GND   |  ← flash mode (GPIO0 low at boot)
+  +--------+        +------------------+
+
+After flashing:
+- GPIO 0 ko GND se hata do.
+- Reset button dabao.
+- ESP32-CAM router se connect hoga aur MJPEG stream dega.
+- FTDI sirf programming ke liye — runtime par WiFi stream chalega.
+
+ESP32-CAM power:
+- Stable 5V supply (500 mA+) recommended.
+- Weak USB/FTDI power se camera boot fail ho sakta hai.
+
+=============================================================================
+SECTION 6: POWER SUPPLY
+=============================================================================
+
+   BATTERY (7V – 12V)
+  +------------------+
+  |       (+) VCC    +---------------------------+
+  |       (-) GND    +-------+                   |
+  +------------------+       |                   v
+                             |              +---------+
+                             +------------->| L298N   |
+                                            | 12V IN  |
+                                            | GND     |
+                                            | 5V OUT  |--- ESP32 DevKit VIN
+                                            +---------+
+
+Separate power recommendation:
+- ESP32-CAM ko alag stable 5V supply do (camera current spike zyada hai).
+- Robot ESP32 + L298N shared battery se chal sakte hain.
+- SAB ka GND common hona ZAROORI hai.
+
+=============================================================================
+SECTION 7: COMPLETE PIN REFERENCE TABLE
+=============================================================================
+
+ESP32 DevKit (Robot Controller):
+| GPIO   | Connected To      | Function                         |
+|--------|-------------------|----------------------------------|
+| 3.3V   | MPU6050 VCC       | IMU power                        |
+| GND    | Shared GND        | Common ground                    |
+| VIN    | L298N 5V          | ESP32 power (5V regulated)       |
+| GPIO21 | MPU6050 SDA       | I2C data                         |
+| GPIO22 | MPU6050 SCL       | I2C clock                        |
+| GPIO25 | L298N ENA         | Left motor PWM                   |
+| GPIO26 | L298N IN1         | Left motor dir A                 |
+| GPIO27 | L298N IN2         | Left motor dir B                 |
+| GPIO32 | L298N IN3         | Right motor dir A                |
+| GPIO33 | L298N ENB         | Right motor PWM                  |
+| GPIO14 | L298N IN4         | Right motor dir B                |
+| GPIO18 | HC-SR04 #1 TRIG   | Front ultrasonic trigger         |
+| GPIO19 | HC-SR04 #1 ECHO   | Front echo (+ 1k/2k divider)     |
+| GPIO 5 | HC-SR04 #2 TRIG   | Left ultrasonic trigger (D5)     |
+| GPIO15 | HC-SR04 #2 ECHO   | Left echo — D15 (+ divider)      |
+| GPIO16 | HC-SR04 #3 TRIG   | Right (optional, 2-sensor skip)  |
+| GPIO 4 | HC-SR04 #3 ECHO   | Right echo (+ divider)           |
+
+ESP32-CAM OV3660:
+| Pin    | Function                                        |
+|--------|-------------------------------------------------|
+| 5V/GND | Power                                           |
+| U0R/U0T| Serial flash via FTDI                           |
+| GPIO0  | Boot/flash (GND at reset = download mode)     |
+| WiFi   | STA → router → http://<ip>:81/stream            |
+
+=============================================================================
+SECTION 8: UDP PORTS & DATA FLOW
+=============================================================================
+| Port  | Direction           | Data                              |
+|-------|---------------------|-----------------------------------|
+| 4210  | Laptop → Robot ESP  | Motor commands {v, omega, seq}    |
+| 4211  | Robot ESP → Laptop  | Telemetry {yaw, dist_cm, rssi...} |
+| 81    | ESP32-CAM → Laptop  | MJPEG video stream (HTTP)         |
+
+=============================================================================
+SECTION 9: STEP-BY-STEP BRING-UP
+=============================================================================
+Step 1 — MPU6050 only:
+  Flash esp32/tests/step1_mpu6050_verify.ino
+  Serial monitor: pitch/roll/yaw verify karo.
+
+Step 2 — Motors + MPU:
+  Flash esp32/robot_controller/ (motors stop without laptop commands).
+
+Step 3 — Ultrasonic:
+  Serial monitor: distance_cm values verify karo (20–400 cm range).
+
+Step 4 — WiFi + UDP:
+  Robot ESP32 router se connect → laptop UDP test.
+  Update project.yaml with robot IP from Serial Monitor.
+
+Step 5 — ESP32-CAM stream:
+  Flash esp32/esp32_cam_stream/
+  Browser mein http://<cam-ip>:81/stream kholo.
+  project.yaml mein stream_url update karo.
+
+Step 6 — Full system:
+  python main_controller.py
+  YOLOv8 human detection + autonomous FSM.
+
+Step 7 — Python debug scripts (human_detector_robot/debug/):
+  python debug/debug_robot_sensors.py   ← MPU yaw + ultrasonic + RSSI
+  python debug/debug_cam_stream.py      ← ESP32-CAM FPS & latency
+  python debug/debug_udp_link.py        ← WiFi UDP speed test
+  python debug/debug_all.py             ← sab ek saath
+
+=============================================================================
+SECTION 10: COMMON MISTAKES
+=============================================================================
+1. MPU6050 not found → SDA/SCL swap? 3.3V power? AD0 grounded?
+2. Motors not spinning → ENA/ENB jumpers removed? MIN_PWM too low?
+3. ESP32-CAM no stream → weak 5V, wrong WiFi creds, GPIO0 still grounded?
+4. Laptop can't reach ESP → sab same router par? firewall UDP 4210/4211?
+5. Ultrasonic always 0 → ECHO voltage divider lagao, TRIG/ECHO swap check karo.
+6. WiFi sensing false positives → pehle empty room baseline lo, phir human test.
+
+=============================================================================
+SECTION 11: SAFETY
+=============================================================================
+- Battery polarity double-check karo — reverse polarity ESP32 fry karta hai.
+- Motor test mein robot ko blocks par rakho (wheels free na hon).
+- GPIO 0 ko runtime par GND mat rakho (ESP32 boot loop).
+- Short circuits se bachne ke liye heat shrink / tape use karo.
+
+=============================================================================

@@ -1,0 +1,166 @@
+﻿================================================================================
+          ARK-5 HUMAN DETECTOR SWARM ROBOTS — COMPLETE SETUP & RUN GUIDE
+================================================================================
+Project: Autonomous Dual-Robot Swarm for Human Detection & Rescue Mapping
+Author/Owner: Muhammad Asad
+Operating System: Windows 10 / 11
+
+This guide provides all software requirements, official download links, pip
+commands, Arduino configurations, and run instructions so anyone can run this
+project on any laptop in minutes.
+
+================================================================================
+1. PREREQUISITES & SOFTWARE DOWNLOAD LINKS
+================================================================================
+
+[A] Python 3.10, 3.11, or 3.12 (64-bit)
+    - Official Download: https://www.python.org/downloads/
+    - CRITICAL STEP during installation: Check the checkbox:
+      [X] "Add python.exe to PATH"
+    - Verify in CMD / PowerShell:
+        python --version
+        pip --version
+
+[B] Arduino IDE (v2.x or v1.8.x)
+    - Official Download: https://www.arduino.cc/en/software
+    - Used to upload firmware sketches to ESP32 DevKit and ESP32-CAM.
+
+[C] ESP32 Board Package in Arduino IDE:
+    - Open Arduino IDE -> File -> Preferences
+    - In "Additional boards manager URLs", paste this link:
+      https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    - Go to Tools -> Board -> Boards Manager -> Search "esp32" -> Install "esp32 by Espressif Systems"
+
+[D] Required Arduino Libraries:
+    - Open Arduino IDE -> Tools -> Manage Libraries...
+    - Search for: ArduinoJson (by Benoit Blanchon) -> Install version 7.x (or 6.x)
+
+================================================================================
+2. ONE-LINE PYTHON INSTALLATION COMMANDS
+================================================================================
+
+Open Windows Command Prompt (cmd) or PowerShell as Administrator and run:
+
+--- OPTION 1: Install all libraries in one single command ---
+pip install opencv-python numpy pyyaml pillow ultralytics torch torchvision
+
+--- OPTION 2: Install via requirements.txt ---
+cd ARK_5\human_detector_robot
+pip install -r requirements.txt
+
+--- VERIFICATION COMMAND (Check if everything is ready) ---
+cd ARK_5
+python human_detector_robot\scripts\verify_project.py
+
+If verify_project.py outputs "[OK]" for all python deps and folders, your laptop
+environment is 100% configured!
+
+================================================================================
+3. WI-FI / HOTSPOT CONFIGURATION (VERY IMPORTANT)
+================================================================================
+
+The robots and cameras connect to the laptop via Wi-Fi.
+
+[Step 1] On your laptop, open Windows Settings -> Network & Internet -> Mobile Hotspot.
+[Step 2] Turn ON Mobile Hotspot.
+[Step 3] Click "Properties" / "Edit":
+         - Network Name (SSID) : unknown
+         - Password            : muhammadasad
+         - Network Band        : 2.4 GHz  <--- MUST BE 2.4 GHz (NOT 5 GHz!)
+         (ESP32 hardware only has a 2.4 GHz radio)
+
+[Step 4] Laptop Gateway IP will be: 192.168.137.1
+         When ESP32 devices connect, they will receive IPs like 192.168.137.xxx
+
+Note: If you ever change the hotspot name or password, just update them in:
+  - ARK_5\esp32\human_detector_robot\config.h (STA_SSID, STA_PASSWORD)
+  - ARK_5\esp32\camera_stream_2640\config.h (WIFI_SSID, WIFI_PASSWORD)
+  - ARK_5\esp32\camera_stream_3660\config.h (WIFI_SSID, WIFI_PASSWORD)
+
+================================================================================
+4. ESP32 SKETCHES & HARDWARE UPLOAD GUIDE
+================================================================================
+
+[TEST 1] Dedicated Motor Test (Zero Wi-Fi or Sensors Needed):
+   File: ARK_5\esp32\tests\step4_motor_verify\step4_motor_verify.ino
+   - Board: "ESP32 Dev Module"
+   - What it does: Runs motors 3s FRONT -> 1.5s pause -> 3s BACK -> 1.5s pause
+                   -> 3s LEFT TURN -> 1.5s pause -> 3s RIGHT TURN -> Repeat.
+   - Shows real-time second-by-second countdown in Serial Monitor (115200 baud).
+   - Put robot on a box so wheels spin in the air for safety.
+
+[TEST 2] Full Hardware Sensor Test (Motors + MPU6050 + 2x Ultrasonic):
+   File: ARK_5\esp32\tests\step3_full_hardware_verify\step3_full_hardware_verify.ino
+   - Open Serial Monitor at 115200 baud.
+   - Press 'r' to run full diagnostic check.
+
+[MAIN 1] ESP32-CAM (Video Streaming):
+   - Robot 1 (OV3660 sensor): ARK_5\esp32\camera_stream_3660\camera_stream_3660.ino
+   - Robot 2 (OV2640 sensor): ARK_5\esp32\camera_stream_2640\camera_stream_2640.ino
+   - Board in Arduino IDE: "AI Thinker ESP32-CAM"
+   - CPU Frequency: 240MHz
+   - Flash Frequency: 80MHz
+   - Upload Speed: 115200
+   - Once flashed, open Serial Monitor to see stream URL (e.g. http://192.168.137.246:81/stream).
+
+[MAIN 2] ESP32 DevKit (Robot Controller Brain):
+   File: ARK_5\esp32\human_detector_robot\human_detector_robot.ino
+   - In config.h, set:
+       #define ROBOT_ID 1   (For Robot 1 - Alpha)
+       #define ROBOT_ID 2   (For Robot 2 - Beta)
+   - Board: "ESP32 Dev Module"
+   - Upload code. Once flashed, ESP32 connects to the hotspot and begins UDP telemetry.
+
+================================================================================
+5. HOW TO RUN THE SYSTEM ON LAPTOP (MAIN COMMANDS)
+================================================================================
+
+Open PowerShell or CMD, navigate to the ARK_5 directory:
+
+[Command A] Run Single Robot (Robot 1):
+   python human_detector_robot\main_controller.py --robot 1
+
+[Command B] Run Single Robot (Robot 2):
+   python human_detector_robot\main_controller.py --robot 2
+
+[Command C] Run Dual-Robot Swarm Controller (Simultaneous 2 Robots):
+   python human_detector_robot\swarm_controller.py
+   - Opens side-by-side dual camera feeds with YOLO11 human detection.
+   - Robot 1 explores Left sectors; Robot 2 explores Right sectors.
+   - Inter-robot proximity bubble (<80cm) triggers automatic collision avoidance.
+   - If one robot is off or drops, the other robot continues uninterrupted!
+
+[Command D] Quick Camera Stream Test (Diagnostic):
+   python human_detector_robot\debug\debug_cam_stream.py --url http://192.168.137.xxx:81/stream
+
+================================================================================
+6. PROJECT OUTPUTS & MAPS
+================================================================================
+
+All map and dead-reckoning trajectory logs are automatically saved in:
+  - ARK_5\human_detector_robot\maps\robot1_map.txt          (Robot 1 2D ASCII Map)
+  - ARK_5\human_detector_robot\maps\robot1_movement_log.txt (Robot 1 cm traveled & MPU degrees turned)
+  - ARK_5\human_detector_robot\maps\robot2_map.txt          (Robot 2 2D ASCII Map)
+  - ARK_5\human_detector_robot\maps\robot2_movement_log.txt (Robot 2 cm traveled & MPU degrees turned)
+  - ARK_5\human_detector_robot\maps\swarm_combined_map.txt  (Merged Multi-Robot Map)
+
+================================================================================
+7. TROUBLESHOOTING QUICK REFERENCE
+================================================================================
+
+1. "Stream read fail / Camera not connecting":
+   - Make sure laptop Mobile Hotspot is ON and set to 2.4 GHz band.
+   - Smart Auto-Discovery in Python will automatically scan and detect the camera IP
+     even if DHCP changes it!
+
+2. "Link: [DISCONNECTED] in Terminal":
+   - Ensure ESP32 DevKit is powered on and connected to Mobile Hotspot.
+   - Verify that "Devices connected" on Hotspot settings shows the ESP32.
+   - Run: ping 192.168.137.xxx in CMD to verify network reachability.
+
+3. "Motors not spinning":
+   - Ensure 12V battery is connected to L298N driver power screw terminals.
+   - Ensure L298N GND is connected to BOTH battery GND AND ESP32 GND (Common Ground!).
+   - Verify with step4_motor_verify.ino first.
+
+================================================================================

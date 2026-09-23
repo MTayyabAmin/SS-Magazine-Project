@@ -1,0 +1,17 @@
+# YOLOv8 training dataset — human posture classes
+# Images daalo: dataset/human/images/train aur images/val
+# Labels daalo:  dataset/human/labels/train aur labels/val
+#
+# Label format (YOLO): class x_center y_center width height  (normalized 0-1)
+#
+# Classes:
+#   0 = standing
+#   1 = fallen
+
+path: .
+train: images/train
+val: images/val
+
+names:
+  0: standing
+  1: fallen
