@@ -1,11 +1,15 @@
 ﻿#!/usr/bin/env python3
 """
-ARK-5 Sophisticated Terminal HUD & Live Telemetry Logger
+ARK-5 Sophisticated Terminal HUD & Live Telemetry Logger.
+
 Provides a clean, tactical real-time dashboard in the terminal showing:
- - Motor actuation state (ON/OFF, Direction, Speeds)
- - Live sensor readings (Sonar Front/Left, MPU Yaw, WiFi RSSI)
- - Human vision detection status
- - Swarm coordination & anti-collision state
+  - Motor actuation state (ON/OFF, Direction, Speeds)
+  - Live sensor readings (Sonar Front/Left, MPU Yaw, WiFi RSSI)
+  - Human vision detection status
+  - Swarm coordination & anti-collision state
+
+Uses ANSI escape codes for colorized output on both Linux and Windows.
+Rendering is throttled to avoid flooding the terminal (max ~3 fps).
 """
 
 from __future__ import annotations
@@ -15,34 +19,59 @@ import sys
 import time
 from typing import Optional
 
-# Ensure UTF-8 output on Windows
+# Ensure UTF-8 output on Windows to prevent encoding errors
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
 
-# Enable ANSI on Windows
+# Enable ANSI escape code processing on Windows (10+)
 if os.name == "nt":
     os.system("")
 
-# ANSI Color Codes
-RESET   = "\033[0m"
-BOLD    = "\033[1m"
-DIM     = "\033[2m"
-RED     = "\033[91m"
-GREEN   = "\033[92m"
-YELLOW  = "\033[93m"
-BLUE    = "\033[94m"
-MAGENTA = "\033[95m"
-CYAN    = "\033[96m"
-WHITE   = "\033[97m"
-BG_RED  = "\033[41m"
-BG_BLUE = "\033[44m"
+# ANSI Color Codes for terminal formatting
+RESET   = "\033[0m"     # Reset all formatting
+BOLD    = "\033[1m"      # Bold/bright text
+DIM     = "\033[2m"      # Dim/faded text
+RED     = "\033[91m"     # Bright red
+GREEN   = "\033[92m"     # Bright green
+YELLOW  = "\033[93m"     # Bright yellow
+BLUE    = "\033[94m"     # Bright blue
+MAGENTA = "\033[95m"     # Bright magenta
+CYAN    = "\033[96m"     # Bright cyan
+WHITE   = "\033[97m"     # Bright white
+BG_RED  = "\033[41m"     # Red background
+BG_BLUE = "\033[44m"     # Blue background
 
 
 def motor_status_str(v: float, omega: float, state_name: str, failsafe: bool) -> tuple[str, str]:
-    """Returns (status_badge, details) for motor state."""
+    """Generate a colorized motor status badge and description string.
+
+    Args:
+        v: Linear velocity in m/s (positive=forward, negative=reverse).
+        omega: Angular velocity in rad/s (positive=left/CCW).
+        state_name: Current FSM state name string.
+        failsafe: True if the robot is in failsafe mode (no telemetry).
+
+    Returns:
+        Tuple of (status_badge, details):
+          - status_badge: ANSI-colorized string showing motor state icon + label.
+          - details: Human-readable description of speed/direction.
+
+    Algorithm:
+      1. If failsafe is True, show FAILSAFE message (red).
+      2. If both v and omega are near zero (stopped):
+         a. If in ALERT/PAUSE state → show PAUSED (magenta).
+         b. If in WALL/OBSTACLE state → show STOPPED (red).
+         c. Otherwise → show IDLE (dim).
+      3. If motors are ON (v or omega non-zero):
+         a. Forward + straight → GREEN FORWARD.
+         b. Forward + turning → YELLOW ARC LEFT/RIGHT.
+         c. Reversing → YELLOW REVERSING.
+         d. Spinning in place (v≈0, omega large) → CYAN SPIN LEFT/RIGHT.
+         e. Otherwise → GREEN generic MOTORS ON.
+    """
     if failsafe:
         return f"{BOLD}{RED}[MOTORS OFF - FAILSAFE]{RESET}", "No telemetry received from robot"
     if abs(v) < 0.01 and abs(omega) < 0.01:
@@ -52,7 +81,7 @@ def motor_status_str(v: float, omega: float, state_name: str, failsafe: bool) ->
             return f"{BOLD}{RED}[MOTORS STOPPED]{RESET}", "Obstacle in safety zone"
         return f"{DIM}[MOTORS IDLE]{RESET}", f"Holding position ({state_name})"
 
-    # Motors are ON
+    # Motors are ON — classify the motion type
     if v > 0.03 and abs(omega) < 0.10:
         return (
             f"{BOLD}{GREEN}[* MOTORS ON - FORWARD]{RESET}",
@@ -91,7 +120,22 @@ def motor_status_str(v: float, omega: float, state_name: str, failsafe: bool) ->
 
 
 def sensor_badge(val: int, name: str, threshold_warn: int = 100) -> str:
-    """Formats ultrasonic reading with colored status badge."""
+    """Format an ultrasonic sensor reading with a color-coded status badge.
+
+    Args:
+        val: Ultrasonic distance reading in centimeters.
+        name: Sensor name label (e.g. 'Front', 'Left').
+        threshold_warn: Distance threshold (cm) for the APPROACHING warning zone.
+
+    Returns:
+        ANSI-colorized string showing distance + status label.
+
+    Algorithm:
+      1. If val is out of valid range (<0 or >400), show FAULT/TIMEOUT (red).
+      2. If val <= 35cm, show OBSTACLE STOP (bold red) — critical proximity.
+      3. If val <= threshold_warn (default 100cm), show APPROACHING (yellow).
+      4. Otherwise, show PATH CLEAR (green).
+    """
     if val < 0 or val > 400:
         return f"{RED}--- cm [FAULT/TIMEOUT]{RESET}"
     if val <= 35:
@@ -102,16 +146,40 @@ def sensor_badge(val: int, name: str, threshold_warn: int = 100) -> str:
 
 
 class TerminalDashboard:
-    """Manages periodic clean terminal rendering without flooding the screen."""
+    """Manages periodic clean terminal rendering without flooding the screen.
+
+    Attributes:
+        interval: Minimum seconds between renders (controls HUD refresh rate).
+        last_render_time: Timestamp of the last render call.
+        last_state: Last FSM state name (forces re-render on state change).
+    """
 
     def __init__(self, refresh_interval_s: float = 0.35):
+        """Initialize the dashboard renderer.
+
+        Args:
+            refresh_interval_s: Minimum seconds between HUD refreshes.
+                               Default 0.35s gives ~3 fps display update rate.
+        """
         self.interval = refresh_interval_s
         self.last_render_time = 0.0
         self.last_state = ""
 
     def should_render(self, state_name: str) -> bool:
+        """Determine if the HUD should re-render based on time or state change.
+
+        Args:
+            state_name: Current FSM state name.
+
+        Returns:
+            True if rendering should occur, False to skip (rate-limited).
+
+        Algorithm:
+          1. If the state name changed since last render, return True (immediate update).
+          2. If the time interval has elapsed, return True and update timestamp.
+          3. Otherwise return False to skip this render cycle.
+        """
         now = time.time()
-        # Force render if state changed or interval elapsed
         if state_name != self.last_state or (now - self.last_render_time) >= self.interval:
             self.last_render_time = now
             self.last_state = state_name
@@ -137,7 +205,37 @@ class TerminalDashboard:
         failsafe: bool = False,
         is_online: bool = True,
     ) -> None:
-        """Prints a sophisticated tactical dashboard for a single robot."""
+        """Print a sophisticated tactical dashboard for a single robot.
+
+        Args:
+            robot_id: Robot identifier number (1 or 2).
+            name: Human-readable robot name (e.g. 'Alpha').
+            state_name: Current FSM state name string.
+            v: Linear velocity in m/s.
+            omega: Angular velocity in rad/s.
+            yaw: Current heading from MPU6050 in degrees.
+            dist_front: Front ultrasonic distance in cm.
+            dist_left: Left ultrasonic distance in cm.
+            dist_right: Right ultrasonic distance in cm.
+            dist_traveled_cm: Total distance traveled in centimeters.
+            sense_rssi: WiFi RSSI sensing value (0 if inactive).
+            cv_alert: Computer vision alert string or None.
+            fps: Current camera processing frame rate.
+            stream_url: Active camera stream URL.
+            failsafe: True if robot is in failsafe mode.
+            is_online: True if robot is connected.
+
+        Algorithm:
+          1. Check if render should occur (rate-limited by should_render).
+          2. Generate motor status badge via motor_status_str().
+          3. Generate sensor badges via sensor_badge() for front and left sonar.
+          4. Determine yaw display, link status, and human detection status.
+          5. Print a formatted box dashboard with sections:
+             - Header with robot ID, name, and state.
+             - Motors & Movement section with badge, details, and odometer.
+             - Live Sensor Readings section with sonar and MPU data.
+             - Rescue & Vision Detection section with human status.
+        """
         if not self.should_render(state_name):
             return
 
@@ -145,13 +243,13 @@ class TerminalDashboard:
         front_badge = sensor_badge(dist_front, "Front", 100)
         left_badge  = sensor_badge(dist_left, "Left", 100)
 
-        # Yaw status
+        # Yaw display
         yaw_badge = f"{CYAN}{yaw:+6.1f} deg{RESET}"
         
-        # Link status
+        # Connection link status
         link_badge = f"{BOLD}{GREEN}[ONLINE]{RESET}" if is_online and not failsafe else f"{BOLD}{RED}[DISCONNECTED]{RESET}"
         
-        # Human status
+        # Human detection status with posture-specific styling
         if cv_alert:
             if "FALLEN" in cv_alert.upper():
                 human_badge = f"{BOLD}{BG_RED}{WHITE} [!] HUMAN FALLEN DETECTED {RESET} -> {cv_alert}"
@@ -162,6 +260,7 @@ class TerminalDashboard:
 
         bar = "+-----------------------------------------------------------------------------+"
         
+        # Print formatted dashboard sections
         print("\n" + bar)
         print(f"| {BOLD}{CYAN}ARK-5 ROBOT #{robot_id} ({name}) -- LIVE TACTICAL DASHBOARD{RESET}{' ' * (31 - len(name))} |")
         print(bar)
@@ -191,7 +290,26 @@ class TerminalDashboard:
         inter_dist_m: float,
         collision_warning: bool,
     ) -> None:
-        """Prints side-by-side tactical telemetry for both swarm robots."""
+        """Print side-by-side tactical telemetry for both swarm robots.
+
+        Args:
+            r1: Robot 1 controller object (must have .fsm, .last_v, .last_omega,
+                .failsafe_active, .dist_front_cm, .dist_left_cm, .yaw,
+                .tmap.total_distance_cm, .status_msg attributes).
+            r2: Robot 2 controller object (same interface as r1).
+            inter_dist_m: Distance between the two robots in meters.
+            collision_warning: True if robots are too close (proximity alert).
+
+        Algorithm:
+          1. Create a combined state string from both robots' FSM states.
+          2. Check if render should occur (rate-limited).
+          3. Generate motor and sensor badges for both robots.
+          4. Print a side-by-side formatted dashboard:
+             - Header with swarm title.
+             - Inter-robot spacing and collision status.
+             - Robot 1 (Alpha, left bias) vs Robot 2 (Beta, right bias) columns.
+             - Link, Motors, Front sonar, Left sonar, Yaw/Odometer, Human status.
+        """
         combo_state = f"{r1.fsm.state.name}_{r2.fsm.state.name}"
         if not self.should_render(combo_state):
             return
@@ -213,14 +331,14 @@ class TerminalDashboard:
         print(f"{BOLD}{CYAN}  ARK-5 SWARM CONTROLLER -- DUAL-ROBOT TACTICAL TELEMETRY HUD{RESET}")
         print(bar)
 
-        # Inter-robot spacing
+        # Inter-robot proximity warning
         if collision_warning:
             print(f"{BOLD}{BG_RED}{WHITE}  [!] SWARM PROXIMITY ALERT: {inter_dist_m:.2f}m apart -- ROBOT 2 YIELDING  {RESET}")
         else:
             print(f"  Swarm Distance: {inter_dist_m:.2f}m | Mutual Anti-Collision: {GREEN}[ACTIVE - SAFE]{RESET}")
         print("-" * 79)
 
-        # Robot 1 vs Robot 2
+        # Side-by-side robot comparison columns
         print(f"  {BOLD}ROBOT #1 (Alpha - Left Bias){RESET}          |  {BOLD}ROBOT #2 (Beta - Right Bias){RESET}")
         print(f"  Link   : {GREEN}ONLINE{RESET} ({r1.fsm.state.name:<13})    |  Link   : {GREEN}ONLINE{RESET} ({r2.fsm.state.name:<13})")
         print(f"  Motors : {m1_badge:<32} |  Motors : {m2_badge:<32}")

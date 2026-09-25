@@ -1,13 +1,19 @@
-"""project.yaml ke zaroori settings validate karta hai.
+"""project.yaml configuration validation utility.
 
-FIX: Pehle agar `config/project.yaml` mein koi zaroori key missing hoti,
-ya kisi key ki type galat hoti (jaise number ki jagah text), code beech
-mein chal kar confusing `KeyError` ya `TypeError` ke saath crash ho
-jata tha — is se pata nahi chalta tha ke ASAL mein masla kahan hai.
+This module validates that all required keys exist in the project configuration
+YAML file and have the correct types before the application starts.
 
-Ab `validate_config()` program shuru hote hi saari zaroori settings
-check karta hai aur agar kuch missing/galat ho to EK clear error message
-deta hai jisme exactly bataya hota hai kaunsi setting theek karni hai.
+Problem Solved:
+  Previously, missing or mistyped config keys would cause confusing KeyError
+  or TypeError crashes deep in the code, making it hard to identify the root
+  cause. Now validate_config() runs at startup and reports ALL problems at
+  once with clear, actionable error messages.
+
+Algorithm Overview:
+  1. Define a list of required keys with expected types and human-readable hints.
+  2. Walk the nested config dict using dotted path notation (e.g. 'robot.udp_port').
+  3. Check each key exists and matches the expected type.
+  4. Collect all problems and raise a single ConfigError with all issues listed.
 """
 
 from __future__ import annotations
@@ -16,10 +22,16 @@ from typing import Any
 
 
 class ConfigError(Exception):
-    """project.yaml mein koi zaroori setting missing ya galat hai."""
+    """Raised when a required config key is missing or has the wrong type.
+
+    The exception message contains a formatted list of all problems found,
+    with dotted key paths and hints for how to fix each one.
+    """
 
 
-# (dotted key path, expected type, human-readable hint)
+# List of (dotted_key_path, expected_type, human_readable_hint) tuples.
+# Each entry defines a required configuration key that must be present
+# and must match the specified type for the application to function.
 _REQUIRED_KEYS: list[tuple[str, type, str]] = [
     ("camera.stream_url", str, "ESP32-CAM ka MJPEG URL, e.g. http://192.168.1.105:81/stream"),
     ("robot.udp_host", str, "Robot ESP32 ka IP address"),
@@ -31,6 +43,23 @@ _REQUIRED_KEYS: list[tuple[str, type, str]] = [
 
 
 def _get_by_path(config: dict[str, Any], dotted_path: str):
+    """Traverse a nested dict using a dotted key path (e.g. 'robot.udp_port').
+
+    Args:
+        config: The root configuration dictionary.
+        dotted_path: Dot-separated key path (e.g. 'yolo.conf').
+
+    Returns:
+        Tuple of (value, found):
+          - value: The value at the path, or None if not found.
+          - found: True if the full path was traversed successfully.
+
+    Algorithm:
+      1. Split the dotted_path by '.' into individual key names.
+      2. Walk the dict chain: for each key, check it exists in the current node.
+      3. If any key is missing or a node is not a dict, return (None, False).
+      4. If the full path is traversed, return (final_value, True).
+    """
     node: Any = config
     for part in dotted_path.split("."):
         if not isinstance(node, dict) or part not in node:
@@ -40,7 +69,25 @@ def _get_by_path(config: dict[str, Any], dotted_path: str):
 
 
 def validate_config(config: dict[str, Any]) -> None:
-    """Raise ConfigError agar koi zaroori setting missing/galat type ki ho."""
+    """Validate all required configuration keys are present and correctly typed.
+
+    Args:
+        config: The parsed project.yaml configuration dictionary.
+
+    Raises:
+        ConfigError: If any required key is missing or has the wrong type.
+                     The exception message lists ALL problems found with
+                     dotted key paths and fix hints.
+
+    Algorithm:
+      1. Verify config is actually a dict (catches empty/malformed YAML).
+      2. Iterate over all _REQUIRED_KEYS entries.
+      3. For each key, use _get_by_path to retrieve the value.
+      4. If not found: record "key is missing" with its hint.
+      5. If found but wrong type: record "key has wrong type (got X)" with hint.
+      6. After checking all keys, if any problems exist, raise ConfigError
+         with a formatted message listing all issues.
+    """
     if not isinstance(config, dict):
         raise ConfigError("project.yaml khali ya galat format mein hai.")
 
