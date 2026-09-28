@@ -18,6 +18,31 @@ Simultaneously controls two identical robots (Robot 1 & Robot 2):
      - Combined swarm map: maps/swarm_combined_map.txt
   5. Live Dual-Camera Dashboard:
      - Side-by-side live video streams with YOLO11 detections and sensor health indicators.
+
+Task areas (mirroring the single-robot controller):
+  - TASK-01/02: per-robot sonar median filters + yaw jump guard.
+  - TASK-03: failsafe-aware dead-reckoning via TentativeMap.update_pose.
+  - TASK-04/05: per-robot occupancy grids (rays + visited cells).
+  - TASK-08: stuck/oscillation watchdog per robot.
+  - TASK-09: de-duplicated human tracker per robot.
+  - TASK-10: WiFi = HINT only; brakes only with CV or 3+ drops + wall.
+  - TASK-11: right sonar read for real, WiFi enabled in swarm, shared
+    merged occupancy grid, yield-timeout → force CRUISE.
+  - TASK-12: shared TerminalDashboard.render_swarm HUD.
+
+Main loop stages (per iteration):
+  1. Telemetry & sensor health per robot (filters, offline/failsafe,
+     per-sonar health warnings, WiFi hints).
+  2. Mutual anti-collision: if both online and < 0.80m apart, Robot 2
+     yields (peer_too_close passed to its FSM).
+  3. Per robot: frame → YOLO (every N) → WiFi gating → FSM step →
+     yield timeout / watchdog / failsafe overrides → UDP command →
+     pose + grids + human tracking → video overlay.
+  4. Autosave every 5s: individual maps, combined swarm map (TASK-11
+     merged occupancy file too).
+  5. Terminal HUD; 6. side-by-side OpenCV window (Q quits).
+  Teardown in finally: save maps, zero-velocity + close UDP, release
+  streams, final combined map/occupancy writes.
 """
 
 from __future__ import annotations
@@ -65,6 +90,41 @@ SAFE_INTER_ROBOT_DISTANCE_M = 0.80  # 80 cm safety bubble between robots
 
 @dataclass
 class RobotContext:
+    """All configuration + runtime state for one robot in the swarm.
+
+    Attributes:
+        robot_id: 1 (Alpha) or 2 (Beta).
+        name: Display name used in logs/HUD.
+        udp_host/udp_port/telemetry_port: ESP32 motor/telemetry endpoints.
+        stream_url: Camera stream URL.
+        map_file/traj_file: Relative paths for the ASCII map + trajectory log.
+        exploration_bias: "left" (Robot 1) or "right" (Robot 2) — drives
+            FSM sector bias and watchdog recovery-turn direction.
+        cap/udp/limiter/fsm/tmap/fps_counter: Runtime components (created
+            in main(); cap may be None if the camera never connected).
+        filters: TASK-01/02 sonar median + yaw jump-guard bundle.
+        wifi_sensor: TASK-10 RSSI-drop hint sensor.
+        human_tracker: TASK-09 de-duplicated survivor tracker.
+        grid: TASK-04/05 occupancy grid (merged across robots by TASK-11).
+        watchdog: TASK-08 stuck/oscillation watchdog.
+        is_online: Telemetry arriving within telemetry_timeout_s.
+        front_sonar_healthy/left_sonar_healthy: A valid reading arrived
+            within the last 3s.
+        last_telemetry_time/last_front_sonar_time/last_left_sonar_time/
+        last_frame_time: Timestamps driving staleness/health checks.
+        yaw/dist_front_cm/dist_left_cm/dist_right_cm: FILTERED sensor
+            values (raw telemetry never reaches FSM/mapping/HUD).
+        wall_near: Firmware wall flag from telemetry.
+        current_x/current_y: Latest dead-reckoned pose (mirrors tmap).
+        last_frame/last_detections: Latest camera frame + YOLO results.
+        last_status/status_msg/health_warning: HUD/log status strings.
+        failsafe_active: True while telemetry is stale (motors forced 0).
+        last_v/last_omega: Latest commanded velocities — required by
+            terminal_hud.render_swarm(); never set here, assigned in the
+            control loop (bugfix comment in-class).
+        _wifi_hint: TASK-10 raw WiFi hint before brake-worthiness gating.
+    """
+
     robot_id: int
     name: str
     udp_host: str
@@ -130,6 +190,21 @@ class RobotContext:
 
 
 def setup_logging(root: Path) -> logging.Logger:
+    """Configure timestamped logging to console + logs/ark5_swarm.log.
+
+    Args:
+        root: Project root (logs/ created underneath).
+
+    Returns:
+        The "ark5.swarm" logger (also assigned to module-level `log`
+        by main() via `global log`).
+
+    Algorithm:
+      1. mkdir root/logs (exist_ok).
+      2. INFO basicConfig with asctime/levelname/name format.
+      3. Attach StreamHandler + UTF-8 FileHandler (ark5_swarm.log).
+      4. Return the named logger.
+    """
     log_dir = root / "logs"
     log_dir.mkdir(exist_ok=True)
     logging.basicConfig(
@@ -144,7 +219,28 @@ def setup_logging(root: Path) -> logging.Logger:
 
 
 def render_combined_swarm_map(r1: RobotContext, r2: RobotContext, out_path: Path) -> None:
-    """Combines paths, positions, and walls of both robots into a unified map."""
+    """Combines paths, positions, and walls of both robots into a unified map.
+
+    Args:
+        r1: Robot 1 (Alpha) context.
+        r2: Robot 2 (Beta) context.
+        out_path: Destination file (e.g. maps/swarm_combined_map.txt).
+
+    Returns:
+        None — writes the ASCII map to out_path (UTF-8).
+
+    Algorithm:
+      1. Allocate a 90x45 blank grid; world (0,0) maps near the bottom
+         center ("S" start marker), +Y up (screen convention).
+      2. Overlay Robot 1's TentativeMap cells: "." (its path) → "1",
+         other glyphs (walls/humans) copied as-is.
+      3. Overlay Robot 2's cells: where Robot 1 already has a path → "+"
+         (shared path); blanks → "2" for its path; other glyphs copied.
+      4. Draw current positions: "A" (Robot 1) / "B" (Robot 2) for
+         online robots.
+      5. Prepend the legend + per-robot distance/yaw/health header with
+         a timestamp, then write all lines joined by newlines.
+    """
     width, height = 90, 45
     cell_size_m = 0.05
     cx, cy = width // 2, height - 4
@@ -201,7 +297,24 @@ def render_combined_swarm_map(r1: RobotContext, r2: RobotContext, out_path: Path
 def merge_occupancy_grids(r1: RobotContext, r2: RobotContext) -> OccupancyGrid:
     """TASK-11: merge both robots' occupancy grids (TASK-04/05) into one
     shared planner grid. OCCUPIED always wins (a wall seen by either
-    robot is a wall); VISITED wins over plain FREE."""
+    robot is a wall); VISITED wins over plain FREE.
+
+    Args:
+        r1: Robot 1 context (r1.grid is its occupancy grid).
+        r2: Robot 2 context (r2.grid is its occupancy grid).
+
+    Returns:
+        A NEW OccupancyGrid (max of both widths/heights, same cell size)
+        containing the union of both robots' observations.
+
+    Algorithm:
+      1. Create an empty merged grid sized to the larger input grid.
+      2. Precedence: OCCUPIED=3 > VISITED=2 > FREE=1.
+      3. For each source grid, for each cell: write the state into the
+         merged grid if it is unset OR if its precedence is strictly
+         lower than the incoming state's.
+      4. Return the merged grid (originals untouched).
+    """
     merged = OccupancyGrid(cell_size_m=r1.grid.cell_size_m,
                             width=max(r1.grid.width, r2.grid.width),
                             height=max(r1.grid.height, r2.grid.height))
@@ -215,6 +328,21 @@ def merge_occupancy_grids(r1: RobotContext, r2: RobotContext) -> OccupancyGrid:
 
 
 def save_merged_occupancy(r1: RobotContext, r2: RobotContext, out_path: Path) -> None:
+    """Write the merged (TASK-11) occupancy grid crop to disk.
+
+    Args:
+        r1: Robot 1 context.
+        r2: Robot 2 context.
+        out_path: Destination file (e.g. maps/swarm_combined_occupancy.txt).
+
+    Returns:
+        None — file written via OccupancyGrid.save().
+
+    Algorithm:
+      1. merged = merge_occupancy_grids(r1, r2).
+      2. Crop center = midpoint of the two robots' current positions.
+      3. merged.save(out_path, center) — parents created as needed.
+    """
     merged = merge_occupancy_grids(r1, r2)
     # Render centered between both robots' current positions.
     cx = (r1.current_x + r2.current_x) / 2.0
@@ -223,7 +351,23 @@ def save_merged_occupancy(r1: RobotContext, r2: RobotContext, out_path: Path) ->
 
 
 def create_placeholder_frame(robot: RobotContext, text: str, subtext: str = "") -> np.ndarray:
-    """Creates a clean status frame when camera is not connected."""
+    """Creates a clean status frame when camera is not connected.
+
+    Args:
+        robot: Robot context (for id, name, last known sensors, stream URL).
+        text: Main status line (e.g. "STATUS: NOT WORKING / OFFLINE").
+        subtext: Optional smaller second line (connection hint).
+
+    Returns:
+        A 640x480x3 uint8 BGR image with border, robot header, status
+        text, last telemetry line, and stream target line.
+
+    Algorithm:
+      1. Black canvas + dark gray border rectangle.
+      2. Header "ROBOT #<id> (<name>)" in orange.
+      3. Status text (red) and optional subtext (gray).
+      4. Last known yaw + sonar readings; stream URL at the bottom.
+    """
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     cv2.rectangle(frame, (10, 10), (630, 470), (40, 40, 40), 2)
     cv2.putText(frame, f"ROBOT #{robot.robot_id} ({robot.name})", (30, 60),
@@ -241,6 +385,20 @@ def create_placeholder_frame(robot: RobotContext, text: str, subtext: str = "") 
 
 
 def cv_alert_message(detections, thresholds: dict) -> tuple[str | None, str | None]:
+    """Pick the highest-priority CV detection meeting its confidence
+    threshold (identical logic to main_controller._cv_alert_message).
+
+    Args:
+        detections: Vision detections (label/confidence objects).
+        thresholds: project.yaml yolo thresholds — keys "fallen",
+            "standing", "person".
+
+    Returns:
+        (alert_msg, map_source): message + "cv_standing"/"cv_fallen"/"cv",
+        or (None, None). Standing is checked before fallen before generic
+        person, so a rescue signal always favors standing/alive humans
+        regardless of list order (FIX: priority order).
+    """
     for d in detections:
         if d.label == "standing" and d.confidence >= thresholds["standing"]:
             return f"[CV] HUMAN STANDING detected (conf={d.confidence:.2f})", "cv_standing"
@@ -254,6 +412,28 @@ def cv_alert_message(detections, thresholds: dict) -> tuple[str | None, str | No
 
 
 def main() -> None:
+    """Run the dual-robot swarm control loop end-to-end.
+
+    Args:
+        None (reads argv):
+          --config: path to project.yaml (default: discovered).
+          --no-motors: vision/HUD only, no UDP motor commands.
+          --no-map: disable ASCII map/trajectory files.
+
+    Returns:
+        None.
+
+    Algorithm:
+      Setup: parse args → load + validate config → logging → warm YOLO →
+      build RobotContext for 1 (left bias) and 2 (right bias) → per-robot
+      camera/UDP/FSM/map initialization → dashboard.
+      Then the 6-stage loop documented in the module header (telemetry &
+      health → anti-collision → per-robot vision/FSM/actuation/mapping →
+      5s autosaves → terminal HUD → side-by-side window).
+      Teardown (finally): save maps, send zero velocity + close UDP,
+      release streams, write combined map + merged occupancy, destroy
+      windows. Ctrl+C handled by KeyboardInterrupt.
+    """
     parser = argparse.ArgumentParser(description="ARK-5 Dual-Robot Swarm Controller")
     parser.add_argument("--config", default=None, help="Path to project.yaml")
     parser.add_argument("--no-motors", action="store_true", help="Vision only, no motor commands")

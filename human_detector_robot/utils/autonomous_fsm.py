@@ -23,6 +23,10 @@ TASK-07 (D4 -- FSM: Path Follow + Junctions) changes vs the original:
   - CREEP_TO_SCAN aborts after ~3s if the 30-40cm standoff isn't reached
     (avoids infinite creep / stuck-at-50cm spinning).
   - TURN_TO_PATH alignment tolerance tightened from 8deg to 4deg.
+
+TASK-11: SWARM_YIELD now times out after yield_timeout_s and reports
+"[SWARM] Yield timeout — requesting replan" so the caller can force a
+state change instead of yielding forever.
 """
 
 from __future__ import annotations
@@ -32,6 +36,17 @@ from enum import Enum, auto
 
 
 class RobotState(Enum):
+    """All possible FSM states — one behavior mode per state.
+
+      - CRUISE: Move forward at cruising speed (with centering + path steering).
+      - STOP_AT_WALL: Halt when a wall is detected within the safety zone.
+      - CREEP_TO_SCAN: Slowly approach the wall to a standoff distance (with timeout).
+      - WIFI_SCAN: Pause for WiFi RSSI sensing, then check side sonars.
+      - SCAN_ROTATE: Spin in place for a full +/-90° sonar sweep.
+      - TURN_TO_PATH: Rotate to align with the chosen heading.
+      - ALERT_PAUSE: Brief stop when a human is detected (CV or WiFi).
+      - SWARM_YIELD: Yield to a peer robot to avoid collision (with timeout).
+    """
     CRUISE = auto()
     STOP_AT_WALL = auto()
     CREEP_TO_SCAN = auto()
@@ -43,6 +58,40 @@ class RobotState(Enum):
 
 
 class AutonomousFSM:
+    """Finite State Machine controlling autonomous robot navigation.
+
+    The FSM processes sensor inputs each tick and returns velocity commands
+    (v, omega). All scanning is done by rotating the entire robot — there is
+    no servo-mounted sensor. When the A* planner (TASK-06) provides a
+    target heading, CRUISE steers toward it on top of corridor centering.
+
+    Attributes:
+        state: Current RobotState.
+        v_cruise: Forward velocity during cruising (m/s).
+        v_creep: Forward velocity during close-approach creeping (m/s).
+        omega_scan: Angular velocity during scan rotation (rad/s).
+        wall_stop_cm: Front sonar distance that triggers a wall stop (cm).
+        scan_standoff_min/max_cm: Acceptable standoff band for scanning (cm).
+        open_path_cm: Sonar distance to consider a path "open" (cm).
+        scan_step_deg: Degrees between sonar samples during scan.
+        scan_side_deg: Degrees to sweep on each side (left and right).
+        alert_pause_s: Duration of human-detection pause (seconds).
+        exploration_bias: 'left'/'right' priority for multi-robot divergence.
+        align_tolerance_deg: TASK-07 — TURN_TO_PATH alignment tolerance (was 8, now 4).
+        creep_timeout_s: TASK-07 — max seconds in CREEP_TO_SCAN before forcing scan.
+        center_gain: TASK-07 — P-gain for corridor centering (omega per cm of error).
+        center_omega_max: TASK-07 — saturation cap on centering omega.
+        path_gain: TASK-07 — P-gain for A* heading steering (omega per degree).
+        path_omega_max: TASK-07 — saturation cap on path steering omega.
+        yield_timeout_s: TASK-11 — max seconds yielding before requesting replan.
+
+    Internal state used by the scan/planner logic:
+        state_entered_at: TASK-08 — timestamp of current state entry (watchdog reads it).
+        _scan_samples: (relative_deg, distance_cm) pairs collected during SCAN_ROTATE.
+        _target_heading: Absolute heading to align to in TURN_TO_PATH.
+        chosen_direction: Human-readable label of the chosen direction.
+    """
+
     def __init__(
         self,
         v_cruise: float = 0.15,
@@ -64,6 +113,34 @@ class AutonomousFSM:
         path_omega_max: float = 0.25,       # TASK-07: cap on path-follow omega
         yield_timeout_s: float = 1.5,       # TASK-11: max time to yield before replanning
     ) -> None:
+        """Initialize the FSM with navigation parameters (all overridable
+        from project.yaml `control` / `robot` sections by the caller).
+
+        Args:
+            v_cruise: Forward speed (m/s) in CRUISE.
+            v_creep: Forward speed (m/s) in CREEP_TO_SCAN.
+            omega_scan: Rotational speed (rad/s) during the scan sweep.
+            wall_stop_cm: Front sonar distance (cm) that triggers STOP_AT_WALL.
+            scan_standoff_min_cm: Minimum standoff to start the WiFi scan.
+            scan_standoff_max_cm: Maximum standoff; creep forward if beyond this.
+            open_path_cm: Sonar distance (cm) to consider a direction "open".
+            scan_step_deg: Degrees between consecutive sonar samples in scan.
+            scan_side_deg: Degrees to sweep on each side from center.
+            alert_pause_s: Seconds to pause when a human is detected.
+            exploration_bias: 'left' or 'right' junction preference (multi-robot).
+            align_tolerance_deg: TASK-07 — degrees of error allowed to call
+                TURN_TO_PATH "aligned".
+            creep_timeout_s: TASK-07 — seconds in CREEP before forcing WIFI_SCAN.
+            center_gain: TASK-07 — omega per cm of left/right sonar imbalance.
+            center_omega_max: TASK-07 — clamp on centering omega magnitude.
+            path_gain: TASK-07 — omega per degree of A* heading error.
+            path_omega_max: TASK-07 — clamp on path-steering omega magnitude.
+            yield_timeout_s: TASK-11 — seconds of yielding before requesting replan.
+
+        Side effects:
+          Stores all parameters, initializes internal scan/alert/heading state,
+          and sets state_entered_at = 0.0 (set on first _enter()).
+        """
         self.state = RobotState.CRUISE
         self.v_cruise = v_cruise
         self.v_creep = v_creep
@@ -101,18 +178,58 @@ class AutonomousFSM:
         self.state_entered_at: float = 0.0
 
     def _elapsed(self, now: float) -> float:
+        """Seconds elapsed since the current state was entered.
+
+        Args:
+            now: Current timestamp (time.time()).
+
+        Returns:
+            now - _state_start in seconds.
+        """
         return now - self._state_start
 
     def _enter(self, state: RobotState, now: float) -> None:
+        """Transition to a new state, recording entry timestamps.
+
+        Args:
+            state: RobotState to transition into.
+            now: Current timestamp (time.time()).
+
+        Side effects:
+          Sets self.state, _state_start (for _elapsed), and state_entered_at
+          (for the TASK-08 watchdog).
+        """
         self.state = state
         self._state_start = now
         self.state_entered_at = now
 
     def _rel_yaw(self, yaw_deg: float) -> float:
-        """Degrees relative to scan center (+ = left, - = right)."""
+        """Degrees relative to scan center (+ = left, - = right).
+
+        Args:
+            yaw_deg: Current absolute yaw in degrees.
+
+        Returns:
+            Signed shortest difference (yaw - scan_center) in [-180, 180).
+        """
         return self._angle_diff(yaw_deg, self._scan_center_yaw)
 
     def _sample_sonar(self, yaw_deg: float, dist_cm: int) -> None:
+        """Record a sonar sample during the sweep if enough rotation occurred.
+
+        Args:
+            yaw_deg: Yaw at which the reading was taken.
+            dist_cm: Front sonar distance (cm).
+
+        Algorithm:
+          1. Ignore invalid readings (dist_cm <= 0).
+          2. Only sample when the robot has rotated at least scan_step_deg
+             since the previous sample (keeps the sample set sparse & even).
+          3. Append (relative_angle, distance) and update the last-sample yaw.
+
+        Side effects:
+          May append one tuple to _scan_samples.
+        """
         if dist_cm <= 0:
             return
         if abs(self._angle_diff(yaw_deg, self._scan_last_sample_yaw)) >= self.scan_step_deg:
@@ -121,7 +238,25 @@ class AutonomousFSM:
             self._scan_last_sample_yaw = yaw_deg
 
     def _pick_best_path(self) -> tuple[float, str]:
-        """Choose best heading from left/right samples with exploration bias."""
+        """Choose best heading from collected sweep samples with exploration bias.
+
+        Returns:
+            Tuple of (heading_degrees, direction_label).
+
+        Algorithm:
+          1. No samples → return (scan_center, "none").
+          2. Filter samples with distance >= open_path_cm ("open" paths).
+          3. If open candidates exist:
+             a. Apply exploration bias — prefer left (rel > 5°) if bias is
+                'left', right (rel < -5°) if bias is 'right'.
+             b. Among the biased subset pick the FARTHEST reading; if the
+                bias yields nothing, fall back to all open candidates.
+          4. If no open path: pick the sample with maximum distance
+             (least blocked) as "BEST AVAILABLE".
+          5. heading = scan_center + best_relative_angle (mod 360).
+          6. Label direction as LEFT/RIGHT (bias noted), FORWARD, or
+             "BEST AVAILABLE (partial opening)".
+        """
         if not self._scan_samples:
             return self._scan_center_yaw, "none"
 
@@ -153,11 +288,26 @@ class AutonomousFSM:
         return heading, direction
 
     def note_sonar(self, dist_cm: int) -> None:
+        """Store the most recent front-sonar reading for external readers.
+
+        Args:
+            dist_cm: Front sonar distance in cm (already filtered).
+        """
         self.last_sonar_sample = dist_cm
 
     def force_state(self, state: RobotState, now: float) -> None:
         """TASK-08: watchdog uses this to force a reset (e.g. back to
-        CRUISE) when the FSM has been stuck."""
+        CRUISE) when the FSM has been stuck.
+
+        Args:
+            state: State to force the FSM into.
+            now: Current timestamp.
+
+        Side effects:
+          Transitions to `state` (updating both timestamps) and clears any
+          pending _target_heading so stale alignment targets don't survive
+          the reset.
+        """
         self._enter(state, now)
         self._target_heading = None
 
@@ -174,12 +324,47 @@ class AutonomousFSM:
         peer_too_close: bool = False,
         target_heading_deg: float | None = None,
     ) -> tuple[float, float, str | None]:
-        """Returns (v, omega). Robot rotates in place — no servo movement.
+        """Execute one FSM tick and return motor commands + status message.
+
+        Returns (v, omega, message):
+          - v: Linear velocity in m/s (positive=forward, negative=reverse).
+          - omega: Angular velocity in rad/s (positive=CCW/left).
+          - message: Status string for logging/HUD, or None.
 
         `target_heading_deg` (TASK-07, optional): if the A* planner (D3)
         has a next waypoint, main_controller passes the bearing toward it
         here and CRUISE blends a small steering term toward it on top of
         corridor centering. If None, CRUISE just goes straight + centers.
+
+        Args:
+            now: Current timestamp (time.time()).
+            dist_cm: FILTERED front sonar (cm), -1 = invalid.
+            dist_left: FILTERED left sonar (cm), -1 = invalid.
+            dist_right: FILTERED right sonar (cm), -1 = invalid when no sensor.
+            wall_near: Pre-computed wall flag from ESP32.
+            yaw_deg: FILTERED MPU heading in degrees.
+            cv_alert: Computer vision alert string or None.
+            wifi_alert: WiFi alert (only after TASK-10 gating) or None.
+            peer_too_close: True when the swarm peer is inside the safety bubble.
+            target_heading_deg: TASK-07 — A* bearing to steer toward, or None.
+
+        Algorithm (priority order):
+          1. SWARM_YIELD: if peer too close, enter yield state, turn in place;
+             after yield_timeout_s return a "replan" request message (TASK-11).
+          2. ALERT_PAUSE: on cv/wifi alert, pause for alert_pause_s then resume
+             the pre-alert activity.
+          3. CRUISE: stop on wall_near or 0<dist<=wall_stop; otherwise drive
+             v_cruise with corridor centering omega (left-right sonar balance)
+             plus A* heading steering when target_heading_deg is given.
+          4. STOP_AT_WALL: single tick, immediately go to CREEP_TO_SCAN.
+          5. CREEP_TO_SCAN: creep until standoff band [30-40cm]; reverse if too
+             close; TASK-07 aborts to WIFI_SCAN after creep_timeout_s.
+          6. WIFI_SCAN: after 0.8s settle, compare BOTH side sonars — turn
+             toward the more open side immediately, else begin SCAN_ROTATE.
+          7. SCAN_ROTATE: full sweep left 90° then right 90°, sampling sonar
+             every scan_step_deg (no early-exit — TASK-07).
+          8. TURN_TO_PATH: proportional alignment (0.04 gain, capped at
+             omega_scan) until within align_tolerance_deg, then CRUISE.
         """
         # Swarm anti-collision: avoid clashing into peer robot
         if peer_too_close:
@@ -202,6 +387,7 @@ class AutonomousFSM:
             yield_turn = 0.35 if self.exploration_bias == "left" else -0.35
             return 0.0, yield_turn, "[SWARM] Still yielding to peer robot..."
 
+        # Human detection takes precedence over every non-yield state
         if cv_alert or wifi_alert:
             if self.state != RobotState.ALERT_PAUSE:
                 self.alert_message = cv_alert or wifi_alert
@@ -251,12 +437,12 @@ class AutonomousFSM:
                 self._enter(RobotState.WIFI_SCAN, now)
                 return 0.0, 0.0, f"[SCAN] Creep timeout ({self.creep_timeout_s:.0f}s) — scanning from {dist_cm}cm"
             if dist_cm < 0:
-                return 0.0, 0.0, None
+                return 0.0, 0.0, None  # no valid reading — hold position
             if self.scan_standoff_min <= dist_cm <= self.scan_standoff_max:
                 self._enter(RobotState.WIFI_SCAN, now)
                 return 0.0, 0.0, f"[SCAN] Standoff {dist_cm}cm OK — WiFi scan..."
             if dist_cm > self.scan_standoff_max:
-                return self.v_creep, 0.0, None
+                return self.v_creep, 0.0, None  # still too far — creep forward
             return -self.v_creep * 0.5, 0.0, f"[SCAN] Too close ({dist_cm}cm) — reverse"
 
         if self.state == RobotState.WIFI_SCAN:
@@ -317,6 +503,7 @@ class AutonomousFSM:
                 self._enter(RobotState.CRUISE, now)
                 return self.v_cruise, 0.0, "[ROBOT] Cruising forward"
 
+            # Proportional alignment: omega = err * 0.04, saturated at omega_scan
             err = self._angle_diff(self._target_heading, yaw_deg)
             if abs(err) < self.align_tolerance_deg:
                 self._target_heading = None
@@ -325,8 +512,19 @@ class AutonomousFSM:
                 return self.v_cruise, 0.0, f"[ROBOT] Aligned — going {d}"
             return 0.0, math.copysign(min(abs(err) * 0.04, self.omega_scan), err), None
 
+        # Fallback: unknown/unhandled state combination → stop safely
         return 0.0, 0.0, None
 
     @staticmethod
     def _angle_diff(target: float, current: float) -> float:
+        """Shortest signed angular difference (target - current) in degrees.
+
+        Args:
+            target: Target angle in degrees.
+            current: Current angle in degrees.
+
+        Returns:
+            Signed difference in [-180, +180). Positive = target is
+            counterclockwise of current.
+        """
         return (target - current + 180) % 360 - 180

@@ -10,6 +10,11 @@ Two independent checks, both Python-only, no hardware involved:
      more than ~8s (excluding states that are legitimately slow, like
      ALERT_PAUSE), reset it back to CRUISE so the mission keeps moving
      instead of freezing for multiple minutes.
+
+The watchdog never touches hardware directly: it returns an override
+(v, omega) that the controller substitutes for the FSM's own output
+for one cycle, plus a human-readable HUD message. When no override is
+active it returns the FSM command unchanged (as (False, 0, 0, None)).
 """
 
 from __future__ import annotations
@@ -24,6 +29,23 @@ _EXEMPT_STATES = {RobotState.ALERT_PAUSE}
 
 
 class StuckWatchdog:
+    """Detects pose-stuck and state-timeout conditions and prescribes
+    short recovery maneuvers (TASK-08).
+
+    Attributes:
+        pose_stuck_timeout_s: Seconds without meaningful movement (with a
+            wall present) before triggering a recovery turn (default 4.0).
+        pose_stuck_radius_m: Movement below this distance (meters) counts
+            as "not moved" (default 0.03 = 3cm).
+        state_timeout_s: Seconds in one FSM state before force-reset to
+            CRUISE (default 8.0).
+        recovery_omega: Turn speed (rad/s) of the recovery spin.
+        recovery_turn_s: Duration (seconds) of the recovery spin.
+        _anchor_x/_anchor_y/_anchor_t: Pose anchor point and its timestamp.
+        _recovering_until: If now < this, a recovery turn is still running.
+        _initialized: Whether the anchor has been seeded once.
+    """
+
     def __init__(
         self,
         pose_stuck_timeout_s: float = 4.0,
@@ -32,6 +54,15 @@ class StuckWatchdog:
         recovery_omega: float = 0.35,
         recovery_turn_s: float = 1.0,
     ) -> None:
+        """Initialize the watchdog thresholds and internal anchor state.
+
+        Args:
+            pose_stuck_timeout_s: Stuck duration before pose recovery.
+            pose_stuck_radius_m: Movement radius that counts as "moving".
+            state_timeout_s: FSM state duration before force-reset.
+            recovery_omega: Recovery turn angular speed (rad/s).
+            recovery_turn_s: Recovery turn duration (seconds).
+        """
         self.pose_stuck_timeout_s = pose_stuck_timeout_s
         self.pose_stuck_radius_m = pose_stuck_radius_m
         self.state_timeout_s = state_timeout_s
@@ -45,6 +76,17 @@ class StuckWatchdog:
         self._initialized = False
 
     def _reset_anchor(self, x: float, y: float, now: float) -> None:
+        """(Re)seed the pose anchor point used by the stuck check.
+
+        Args:
+            x: Current robot X in meters.
+            y: Current robot Y in meters.
+            now: Current timestamp (epoch seconds).
+
+        Side effects:
+          _anchor_x/_anchor_y set to (x, y); _anchor_t set to now — the
+          stuck timer effectively restarts.
+        """
         self._anchor_x, self._anchor_y = x, y
         self._anchor_t = now
 
@@ -59,7 +101,41 @@ class StuckWatchdog:
     ) -> tuple[bool, float, float, str | None]:
         """Returns (override_active, v, omega, message). If
         override_active is False, the caller should use the FSM's own
-        (v, omega) unchanged."""
+        (v, omega) unchanged.
+
+        Args:
+            now: Current timestamp (epoch seconds).
+            x: Robot world X in meters.
+            y: Robot world Y in meters.
+            wall_present: True when a nearby wall/obstacle is detected
+                (from the filtered sonar readings).
+            fsm: The FSM instance being supervised (read + force_state).
+            exploration_bias: "left" or "right" — the recovery turn spins
+                OPPOSITE this direction to break a wedge/wobble.
+
+        Returns:
+            (override_active, v, omega, message):
+              override_active=False → ignore v/omega/message (use FSM's).
+              override_active=True  → substitute (v, omega) this cycle;
+                                      message is a HUD/log string.
+
+        Algorithm:
+          1. First call ever → seed the pose anchor from the current
+             position and return no override.
+          2. Mid-recovery (now < _recovering_until) → keep commanding the
+             spin (v=0, omega=±recovery_omega) until the timer expires;
+             sign is opposite the exploration bias.
+          3. Pose check: if moved > pose_stuck_radius_m from the anchor,
+             re-anchor (robot is progressing). Else if a wall is present
+             and the anchor is older than pose_stuck_timeout_s → re-anchor,
+             schedule a recovery turn ending at now + recovery_turn_s,
+             and return the spin override with a message.
+          4. State check: for non-exempt FSM states (ALERT_PAUSE is
+             exempt), if now - fsm.state_entered_at >= state_timeout_s →
+             fsm.force_state(CRUISE), re-anchor, and return a cruise
+             override (v=v_cruise, omega=0) with a message.
+          5. Otherwise → (False, 0, 0, None): no override needed.
+        """
         if not self._initialized:
             self._reset_anchor(x, y, now)
             self._initialized = True

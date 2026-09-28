@@ -4,6 +4,32 @@ ARK-5 Human Detector Robot — Main Controller (Laptop Brain)
 
 CV (YOLOv8) + WiFi sensing + Ultrasonic wall stop + MPU dead-reckoning
 + tentative ASCII map + L-turn corner scan algorithm.
+
+Architecture
+-----------
+Single-robot control loop (run once per robot with --robot 1|2):
+
+  1. Setup: parse args, load + validate project.yaml, resolve the target
+     robot's UDP/stream/map paths, warm up YOLO, open the camera stream,
+     and build the sensor filters, FSM, occupancy grid, watchdog,
+     human tracker, WiFi sensor, and optional ASCII map.
+  2. Loop (per frame):
+     a. Read frame; run YOLO only every `infer_every_n` frames (reuse
+        last detections in between to protect CPU/FPS).
+     b. Poll UDP telemetry; clean sonar + yaw through TASK-01/02 filters
+        so invalid -1s / spikes / yaw teleports never reach the FSM.
+     c. Track telemetry staleness → motors-stop FAILSAFE (FIX).
+     d. WiFi sense → HINT only; escalates to an alert only with CV
+        confirmation or 3+ consecutive drops plus a wall ahead (TASK-10).
+     e. Update occupancy grid + A* frontier plan → target heading for
+        CRUISE (TASK-04/05/06); fall back to FSM scan if no path.
+     f. FSM step → (v, omega); failsafe and StuckWatchdog may override
+        (TASK-08).
+     g. Update pose/map/walls (dead-reckoning with failsafe awareness,
+        TASK-03); register unique humans (TASK-09); autosave map.
+     h. Send rate-limited motor command; render HUD (TASK-12) and
+        optional OpenCV preview.
+  3. Teardown: save final map + trajectory, close UDP/stream/windows.
 """
 
 from __future__ import annotations
@@ -50,6 +76,23 @@ HUMAN_MARK_COOLDOWN_S = 5.0
 # field mein crash ho jaye to pata lagana mushkil tha ke kab/kyun hua.
 # Ab console + log file dono mein timestamped logs jaate hain.
 def _setup_logging(root: Path) -> logging.Logger:
+    """Configure timestamped logging to console + logs/ark5.log.
+
+    FIX: pehle poore project mein sirf print() use ho raha tha — ab
+    console + log file dono mein timestamped logs jaate hain.
+
+    Args:
+        root: Project root directory (logs/ is created underneath it).
+
+    Returns:
+        The "ark5.main" logger instance used throughout main().
+
+    Algorithm:
+      1. mkdir root/logs (exist_ok).
+      2. basicConfig INFO with asctime/levelname/name format.
+      3. Attach StreamHandler (console) + FileHandler (UTF-8 ark5.log).
+      4. Return the named logger.
+    """
     log_dir = root / "logs"
     log_dir.mkdir(exist_ok=True)
     logging.basicConfig(
@@ -76,6 +119,22 @@ def _cv_alert_message(detections, thresholds: dict) -> tuple[str | None, str | N
     ko baad mein — chahe list mein fallen wala pehle number par kyun na
     ho. Isliye ab pehle SAARI detections mein standing dhoonda jata hai;
     sirf tab fallen check hota hai jab koi standing na mile.
+
+    Args:
+        detections: Vision detections (label/confidence/box objects).
+        thresholds: Per-class confidence thresholds from project.yaml
+            (keys: "fallen", "standing", "person").
+
+    Returns:
+        (alert_msg, map_source): alert message string + source class
+        ("cv_standing"/"cv_fallen"/"cv") for the highest-priority
+        detection meeting its threshold, or (None, None) if none qualify.
+
+    Algorithm:
+      1. Pass 1: any "standing" d with conf >= standing → alert + "cv_standing".
+      2. Pass 2: any "fallen" d with conf >= fallen → alert + "cv_fallen".
+      3. Pass 3: any "person" d with conf >= person → alert + "cv".
+      4. Otherwise (None, None).
     """
     for d in detections:
         if d.label == "standing" and d.confidence >= thresholds["standing"]:
@@ -90,6 +149,26 @@ def _cv_alert_message(detections, thresholds: dict) -> tuple[str | None, str | N
 
 
 def main() -> None:
+    """Run the single-robot control loop end-to-end (see module docstring).
+
+    Args:
+        None (reads argv via argparse):
+          --robot {1,2}: target robot id (default: config active_robot).
+          --config: path to project.yaml (default: discovered).
+          --calibrate-wifi: reset the RSSI baseline instead of using it.
+          --no-motors: vision + HUD only, no UDP motor commands.
+          --no-map: disable the ASCII map/trajectory files.
+
+    Returns:
+        None.
+
+    Algorithm:
+      Setup (config → validate → robot resolution → YOLO/stream →
+      clients/FSM/filters/grid/watchdog/tracker/WiFi/map), then the
+      per-frame loop documented in the module header, then teardown in
+      a finally block (final map save, UDP close, stream/Windows release).
+      Ctrl+C exits cleanly via KeyboardInterrupt.
+    """
     parser = argparse.ArgumentParser(description="ARK-5 Human Detector Robot (Multi-Robot Brain)")
     parser.add_argument("--robot", type=int, default=None, choices=[1, 2], help="Target Robot ID (1 or 2)")
     parser.add_argument("--config", default=None, help="Path to project.yaml")
