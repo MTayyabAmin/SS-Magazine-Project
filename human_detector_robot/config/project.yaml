@@ -80,6 +80,33 @@ control:
   scan_side_deg: 90           # scan 90° LEFT + 90° RIGHT (T-junction both sides)
   alert_pause_s: 2.0          # pause after human detect, then continue
   show_preview: true
+  # TASK-07 (D4 -- FSM: Path Follow + Junctions)
+  align_tolerance_deg: 4.0    # was 8.0 -- tighter alignment before cruising
+  creep_timeout_s: 3.0        # abort creep -> scan if 30-40cm not reached in time
+  center_gain: 0.0035         # corridor centering P-gain (left/right sonar diff -> omega)
+  center_omega_max: 0.15      # cap on centering omega
+  path_gain: 0.02             # A* waypoint heading-follow P-gain
+  path_omega_max: 0.25        # cap on path-follow omega
+
+# TASK-01 through TASK-09 tunables (D1/D2/D5) -- all Python/YAML only,
+# no hardware/firmware changes. See TEAM_NAVIGATION_TASKS.pdf.
+navigation:
+  # TASK-01: sonar median filter
+  sonar_filter_window: 5
+  sonar_max_jump_cm: 80.0
+  # TASK-02: yaw jump guard
+  yaw_max_deg_per_s: 90.0
+  # TASK-04: occupancy grid cell size (planner map, separate from the
+  # human-readable ASCII map in the `map:` section above)
+  occupancy_cell_m: 0.05
+  # TASK-06/07: how often (seconds) to replan a frontier path with A*
+  replan_interval_s: 1.5
+  # TASK-08: stuck / oscillation watchdog
+  watchdog_pose_timeout_s: 4.0
+  watchdog_state_timeout_s: 8.0
+  # TASK-09: unique human tracker merge radius (a detection within this
+  # many meters of an existing pin is treated as the SAME person)
+  human_merge_radius_m: 0.8
 
 map:
   enabled: true

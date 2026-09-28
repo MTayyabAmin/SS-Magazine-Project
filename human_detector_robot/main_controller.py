@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,11 @@ from utils.vision import (
 )
 from utils.terminal_hud import TerminalDashboard
 from utils.wifi_sensing import WifiHumanSensor
+from utils.sensor_filter import RobotSensorFilters
+from utils.occupancy_grid import OccupancyGrid
+from utils.astar import astar, path_to_waypoints, next_heading_deg
+from utils.human_tracker import HumanTracker
+from utils.watchdog import StuckWatchdog
 
 HUMAN_MARK_COOLDOWN_S = 5.0
 
@@ -153,7 +159,34 @@ def main() -> None:
         scan_step_deg=ctrl_cfg.get("scan_step_deg", 15),
         scan_side_deg=ctrl_cfg.get("scan_side_deg", 90),
         alert_pause_s=ctrl_cfg.get("alert_pause_s", 2.0),
+        align_tolerance_deg=ctrl_cfg.get("align_tolerance_deg", 4.0),
+        creep_timeout_s=ctrl_cfg.get("creep_timeout_s", 3.0),
+        center_gain=ctrl_cfg.get("center_gain", 0.0035),
+        center_omega_max=ctrl_cfg.get("center_omega_max", 0.15),
+        path_gain=ctrl_cfg.get("path_gain", 0.02),
+        path_omega_max=ctrl_cfg.get("path_omega_max", 0.25),
     )
+
+    # TASK-01/02: sonar median filter + yaw jump guard (D1)
+    nav_cfg = config.get("navigation", {})
+    filters = RobotSensorFilters(
+        window=nav_cfg.get("sonar_filter_window", 5),
+        max_jump_cm=nav_cfg.get("sonar_max_jump_cm", 80.0),
+        max_yaw_deg_per_s=nav_cfg.get("yaw_max_deg_per_s", 90.0),
+    )
+    # TASK-04/05: occupancy grid the A* planner (TASK-06) plans on
+    grid = OccupancyGrid(cell_size_m=nav_cfg.get("occupancy_cell_m", 0.05))
+    # TASK-08: stuck / oscillation watchdog
+    watchdog = StuckWatchdog(
+        pose_stuck_timeout_s=nav_cfg.get("watchdog_pose_timeout_s", 4.0),
+        state_timeout_s=nav_cfg.get("watchdog_state_timeout_s", 8.0),
+    )
+    # TASK-09: de-duplicated human/survivor tracker
+    human_tracker = HumanTracker(merge_radius_m=nav_cfg.get("human_merge_radius_m", 0.8))
+    astar_path_world: list[tuple[float, float]] = []
+    astar_wp_index = 0
+    next_replan_time = 0.0
+    replan_interval_s = nav_cfg.get("replan_interval_s", 1.5)
 
     wifi_sensor = WifiHumanSensor(
         rssi_drop_threshold_dbm=config.get("wifi_sensing", {}).get("rssi_drop_threshold_dbm", 8.0)
@@ -212,12 +245,17 @@ def main() -> None:
             telem = udp.poll_telemetry() if udp else None
             telemetry_stale = udp is not None and udp.seconds_since_telemetry() > telemetry_timeout_s
 
-            dist_cm = int(telem.get("dist_front_cm", telem.get("dist_cm", -1))) if telem else -1
-            dist_left = int(telem.get("dist_left_cm", -1)) if telem else -1
-            dist_right = int(telem.get("dist_right_cm", -1)) if telem else -1
+            raw_dist_cm = int(telem.get("dist_front_cm", telem.get("dist_cm", -1))) if telem else -1
+            raw_dist_left = int(telem.get("dist_left_cm", -1)) if telem else -1
+            raw_dist_right = int(telem.get("dist_right_cm", -1)) if telem else -1
             wall_near = bool(telem.get("wall_near", False)) if telem else False
             sense_rssi = int(telem.get("sense_rssi", 0)) if telem else 0
-            yaw = float(telem.get("yaw", 0.0)) if telem else 0.0
+            raw_yaw = float(telem.get("yaw", 0.0)) if telem else 0.0
+
+            # TASK-01/02: clean sonar + yaw BEFORE the FSM/mapping ever
+            # sees them -- invalid -1s, spikes, and yaw teleports never
+            # reach the rest of the system.
+            dist_cm, dist_left, dist_right, yaw = filters.apply(raw_dist_cm, raw_dist_left, raw_dist_right, raw_yaw)
 
             if telemetry_stale and not failsafe_active:
                 failsafe_active = True
@@ -229,12 +267,51 @@ def main() -> None:
                 failsafe_active = False
                 log.info("Telemetry link wapis aa gaya — failsafe hata diya")
 
-            wifi_alert = None
+            wifi_hint = None
             if sense_rssi != 0:
                 if args.calibrate_wifi or wifi_sensor.baseline_rssi is None:
                     wifi_sensor.calibrate(float(sense_rssi))
                 else:
-                    wifi_alert = wifi_sensor.update(float(sense_rssi))
+                    wifi_hint = wifi_sensor.update(float(sense_rssi))
+
+            # TASK-10: WiFi is a HINT, not a brake by itself. Only escalate
+            # to an actual motor-stopping alert if CV also confirms, OR
+            # there have been 3+ consecutive drops AND a wall is ahead.
+            wall_ahead = 0 < dist_cm <= fsm.wall_stop_cm
+            wifi_alert = None
+            if wifi_hint and (cv_alert or (wifi_sensor.consecutive_drops >= 3 and wall_ahead)):
+                wifi_alert = wifi_hint
+
+            # TASK-04/05/06/07: update the occupancy grid from filtered
+            # sonar, then (re)plan a frontier path with A* and hand the
+            # FSM a heading to steer toward during CRUISE.
+            target_heading_deg = None
+            if fsm.state.name == "CRUISE" and tmap is not None:
+                if dist_cm > 0:
+                    grid.mark_ray(tmap.x, tmap.y, yaw, dist_cm)
+                if dist_left > 0:
+                    grid.mark_ray(tmap.x, tmap.y, yaw + 90.0, dist_left)
+                if dist_right > 0:
+                    grid.mark_ray(tmap.x, tmap.y, yaw - 90.0, dist_right)
+                grid.mark_visited(tmap.x, tmap.y)
+
+                if (not astar_path_world or astar_wp_index >= len(astar_path_world)) and now >= next_replan_time:
+                    next_replan_time = now + replan_interval_s
+                    start_cell = grid.world_to_cell(tmap.x, tmap.y)
+                    goal_xy = grid.nearest_frontier(tmap.x, tmap.y)
+                    astar_path_world, astar_wp_index = [], 0
+                    if goal_xy is not None:
+                        goal_cell = grid.world_to_cell(*goal_xy)
+                        path_cells = astar(grid, start_cell, goal_cell)
+                        if path_cells:  # TASK-06: if no path, fall back to FSM scan (target stays None)
+                            astar_path_world = path_to_waypoints(grid, path_cells)
+
+                if astar_wp_index < len(astar_path_world):
+                    wp = astar_path_world[astar_wp_index]
+                    if math.hypot(wp[0] - tmap.x, wp[1] - tmap.y) < 0.1:
+                        astar_wp_index += 1
+                    if astar_wp_index < len(astar_path_world):
+                        target_heading_deg = next_heading_deg((tmap.x, tmap.y), astar_path_world[astar_wp_index])
 
             v, omega, status = fsm.step(
                 now=time.time(),
@@ -245,12 +322,26 @@ def main() -> None:
                 yaw_deg=yaw,
                 cv_alert=cv_alert,
                 wifi_alert=wifi_alert,
+                target_heading_deg=target_heading_deg,
             )
             # FIX: telemetry stale ho to failsafe — motors ko force stop
             # karo, chahe FSM kuch bhi decide kare. Ye robot ko purane
             # data par blindly chalte rehne se bachata hai.
             if failsafe_active:
                 v, omega = 0.0, 0.0
+
+            # TASK-08: stuck / oscillation watchdog -- can override (v, omega)
+            if tmap is not None:
+                wd_active, wd_v, wd_omega, wd_msg = watchdog.check(
+                    now=now, x=tmap.x, y=tmap.y,
+                    wall_present=(0 < dist_cm <= fsm.wall_stop_cm),
+                    fsm=fsm,
+                )
+                if wd_active:
+                    v, omega = wd_v, wd_omega
+                    status = wd_msg
+                    astar_path_world, astar_wp_index = [], 0  # force a replan after recovery
+
             last_v, last_omega = v, omega
 
             # --- Tentative map & MPU Trajectory update ---
@@ -262,23 +353,43 @@ def main() -> None:
                     dist_front_cm=dist_cm,
                     dist_left_cm=dist_left,
                     state_name=fsm.state.name,
+                    failsafe_active=failsafe_active,  # TASK-03
                 )
                 if dist_cm > 0:
                     tmap.mark_wall_from_ultrasonic(dist_cm, yaw)
                     if fsm.state.name in ("SCAN_ROTATE", "CREEP_TO_SCAN", "WIFI_SCAN"):
                         fsm.note_sonar(dist_cm)
 
-                human_event = cv_source or (wifi_alert and "wifi")
-                if human_event and (now - last_human_mark) >= HUMAN_MARK_COOLDOWN_S:
-                    last_human_mark = now
-                    if cv_source:
-                        tmap.mark_human(cv_source, note=cv_alert or "")
-                    elif wifi_alert:
-                        offset = dist_cm / 100.0 if dist_cm > 0 else 1.0
-                        tmap.mark_human("wifi", note=wifi_alert, offset_m=offset)
-                    path_m, path_t = tmap.save()
-                    log.info("MAP & TRAJECTORY saved -> %s & %s", path_m.name, path_t.name)
-                    last_map_save = now
+                # TASK-09: unique human tracker -- a pin is only created
+                # (and only logged) if it's not the same person already
+                # tracked nearby. Replaces the old TIME-only cooldown,
+                # which let one person be logged 18+ times.
+                human_event_cls = cv_source or (wifi_alert and "wifi")
+                if human_event_cls:
+                    offset_m = (dist_cm / 100.0) if dist_cm > 0 else 1.2
+                    yaw_rad = math.radians(yaw)
+                    hx = tmap.x + offset_m * math.cos(yaw_rad)
+                    hy = tmap.y + offset_m * math.sin(yaw_rad)
+                    conf = 0.5
+                    for d in detections:
+                        if d.label in ("standing", "fallen", "person"):
+                            conf = d.confidence
+                            break
+                    track, is_new = human_tracker.observe(human_event_cls, conf, hx, hy, now=now)
+                    if is_new:
+                        tmap.mark_human(human_event_cls, note=cv_alert or wifi_alert or "",
+                                         override_xy=(track.x, track.y))
+                        path_m, path_t = tmap.save()
+                        log.info("MAP & TRAJECTORY saved -> %s & %s", path_m.name, path_t.name)
+                        last_map_save = now
+                elif wifi_hint:
+                    # TASK-10: unconfirmed wifi hint still drawn as '?' but
+                    # never stops the robot and never inflates human_count.
+                    offset_m = (dist_cm / 100.0) if dist_cm > 0 else 1.0
+                    yaw_rad = math.radians(yaw)
+                    hx = tmap.x + offset_m * math.cos(yaw_rad)
+                    hy = tmap.y + offset_m * math.sin(yaw_rad)
+                    tmap.mark_human("wifi", note=wifi_hint, override_xy=(hx, hy), is_hint=True)
 
                 # Periodic autosave every 10s
                 if now - last_map_save >= 10.0:
@@ -297,6 +408,7 @@ def main() -> None:
                 udp.send_command(v, omega, allow_creep=allow_creep)
 
             # Render sophisticated real-time terminal HUD
+            frontier_goal = grid.nearest_frontier(tmap.x, tmap.y) if tmap is not None else None
             dashboard.render_single_robot(
                 robot_id=robot_id,
                 name=target_cfg.get("name", f"Robot_{robot_id}"),
@@ -314,6 +426,9 @@ def main() -> None:
                 stream_url=cap.stream_url,
                 failsafe=failsafe_active,
                 is_online=not telemetry_stale,
+                astar_path_len=max(0, len(astar_path_world) - astar_wp_index),
+                human_count=human_tracker.count,
+                frontier_goal=frontier_goal,
             )
 
             if show:

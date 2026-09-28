@@ -52,6 +52,11 @@ from utils.vision import (
     warmup_yolo,
 )
 from utils.terminal_hud import TerminalDashboard
+from utils.sensor_filter import RobotSensorFilters
+from utils.wifi_sensing import WifiHumanSensor
+from utils.human_tracker import HumanTracker
+from utils.occupancy_grid import OccupancyGrid, OCCUPIED, FREE, VISITED
+from utils.watchdog import StuckWatchdog
 
 log = logging.getLogger("ark5.swarm")
 
@@ -78,6 +83,17 @@ class RobotContext:
     tmap: TentativeMap | None = None
     fps_counter: FpsCounter = field(default_factory=FpsCounter)
 
+    # TASK-01/02: per-sensor median filters + yaw jump guard
+    filters: RobotSensorFilters = field(default_factory=RobotSensorFilters)
+    # TASK-10: WiFi RSSI is a hint source, never a brake by itself
+    wifi_sensor: WifiHumanSensor = field(default_factory=WifiHumanSensor)
+    # TASK-09: de-duplicated human/survivor tracker
+    human_tracker: HumanTracker = field(default_factory=HumanTracker)
+    # TASK-04/05/TASK-11: this robot's own occupancy grid (merged later)
+    grid: OccupancyGrid = field(default_factory=OccupancyGrid)
+    # TASK-08: stuck / oscillation watchdog
+    watchdog: StuckWatchdog = field(default_factory=StuckWatchdog)
+
     # Health & Telemetry State
     is_online: bool = False
     front_sonar_healthy: bool = False
@@ -87,10 +103,11 @@ class RobotContext:
     last_left_sonar_time: float = 0.0
     last_frame_time: float = 0.0
 
-    # Current Sensor Readings
+    # Current Sensor Readings (TASK-01/02: these are the FILTERED values)
     yaw: float = 0.0
     dist_front_cm: int = -1
     dist_left_cm: int = -1
+    dist_right_cm: int = -1
     wall_near: bool = False
     current_x: float = 0.0
     current_y: float = 0.0
@@ -102,6 +119,14 @@ class RobotContext:
     status_msg: str = "INITIALIZING"
     health_warning: str = ""
     failsafe_active: bool = False
+    # NOTE (bug found while wiring TASK-12): render_swarm() in
+    # terminal_hud.py reads r.last_v / r.last_omega, but nothing ever
+    # set them -- this crashed the HUD with AttributeError. Declaring +
+    # assigning them below fixes it.
+    last_v: float = 0.0
+    last_omega: float = 0.0
+    # TASK-10: latest raw wifi hint (before brake-worthiness gating)
+    _wifi_hint: str | None = None
 
 
 def setup_logging(root: Path) -> logging.Logger:
@@ -171,6 +196,30 @@ def render_combined_swarm_map(r1: RobotContext, r2: RobotContext, out_path: Path
     ]
     lines.extend("".join(row).rstrip() for row in grid)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def merge_occupancy_grids(r1: RobotContext, r2: RobotContext) -> OccupancyGrid:
+    """TASK-11: merge both robots' occupancy grids (TASK-04/05) into one
+    shared planner grid. OCCUPIED always wins (a wall seen by either
+    robot is a wall); VISITED wins over plain FREE."""
+    merged = OccupancyGrid(cell_size_m=r1.grid.cell_size_m,
+                            width=max(r1.grid.width, r2.grid.width),
+                            height=max(r1.grid.height, r2.grid.height))
+    _PRECEDENCE = {OCCUPIED: 3, VISITED: 2, FREE: 1}
+    for src in (r1.grid, r2.grid):
+        for cell, state in src._cells.items():
+            current = merged._cells.get(cell)
+            if current is None or _PRECEDENCE.get(state, 0) > _PRECEDENCE.get(current, 0):
+                merged._cells[cell] = state
+    return merged
+
+
+def save_merged_occupancy(r1: RobotContext, r2: RobotContext, out_path: Path) -> None:
+    merged = merge_occupancy_grids(r1, r2)
+    # Render centered between both robots' current positions.
+    cx = (r1.current_x + r2.current_x) / 2.0
+    cy = (r1.current_y + r2.current_y) / 2.0
+    merged.save(out_path, robot_x_m=cx, robot_y_m=cy)
 
 
 def create_placeholder_frame(robot: RobotContext, text: str, subtext: str = "") -> np.ndarray:
@@ -295,6 +344,12 @@ def main() -> None:
             scan_side_deg=ctrl_cfg.get("scan_side_deg", 90),
             alert_pause_s=ctrl_cfg.get("alert_pause_s", 2.0),
             exploration_bias=r.exploration_bias,
+            align_tolerance_deg=ctrl_cfg.get("align_tolerance_deg", 4.0),
+            creep_timeout_s=ctrl_cfg.get("creep_timeout_s", 3.0),
+            center_gain=ctrl_cfg.get("center_gain", 0.0035),
+            center_omega_max=ctrl_cfg.get("center_omega_max", 0.15),
+            path_gain=ctrl_cfg.get("path_gain", 0.02),
+            path_omega_max=ctrl_cfg.get("path_omega_max", 0.25),
         )
 
         if not args.no_map:
@@ -308,6 +363,7 @@ def main() -> None:
             )
 
     combined_map_path = root / "maps/swarm_combined_map.txt"
+    combined_occupancy_path = root / "maps/swarm_combined_occupancy.txt"  # TASK-11
     last_swarm_map_save = 0.0
     frame_idx = 0
     dashboard = TerminalDashboard(refresh_interval_s=0.4)
@@ -325,11 +381,21 @@ def main() -> None:
                 if telem:
                     r.last_telemetry_time = now
                     r.is_online = True
-                    r.yaw = float(telem.get("yaw", r.yaw))
-                    f_cm = int(telem.get("dist_front_cm", telem.get("dist_cm", -1)))
-                    l_cm = int(telem.get("dist_left_cm", -1))
+                    raw_yaw = float(telem.get("yaw", r.yaw))
+                    raw_f = int(telem.get("dist_front_cm", telem.get("dist_cm", -1)))
+                    raw_l = int(telem.get("dist_left_cm", -1))
+                    # TASK-11: read the REAL right sonar from telemetry --
+                    # it was previously hardcoded to -1 below, meaning
+                    # Robot 2 could never see or take a right opening.
+                    raw_r = int(telem.get("dist_right_cm", -1))
+
+                    # TASK-01/02: median-filter sonars + yaw-jump-guard
+                    # BEFORE anything else (FSM, mapping, HUD) sees them.
+                    f_cm, l_cm, r_cm, filt_yaw = r.filters.apply(raw_f, raw_l, raw_r, raw_yaw)
+                    r.yaw = filt_yaw
                     r.dist_front_cm = f_cm
                     r.dist_left_cm = l_cm
+                    r.dist_right_cm = r_cm
                     r.wall_near = bool(telem.get("wall_near", False))
 
                     if f_cm > 0:
@@ -338,6 +404,17 @@ def main() -> None:
                     if l_cm > 0:
                         r.last_left_sonar_time = now
                         r.left_sonar_healthy = True
+
+                    # TASK-11: enable WiFi sensing like single-robot mode
+                    # (previously WiFi was always disabled in swarm mode).
+                    sense_rssi = telem.get("sense_rssi", 0)
+                    if sense_rssi:
+                        if r.wifi_sensor.baseline_rssi is None:
+                            r.wifi_sensor.calibrate(float(sense_rssi))
+                        else:
+                            r._wifi_hint = r.wifi_sensor.update(float(sense_rssi))
+                    else:
+                        r._wifi_hint = None
 
                 # Evaluate Health Status
                 telem_age = now - r.last_telemetry_time
@@ -391,23 +468,52 @@ def main() -> None:
                     dets = r.last_detections
                     cv_alert, cv_source = cv_alert_message(dets, cv_thresholds)
 
+                    # TASK-10: WiFi is a HINT, not a brake. Only escalate to
+                    # an actual motor-stopping alert if CV also confirms, OR
+                    # there have been 3+ consecutive drops AND a wall ahead.
+                    wall_ahead = 0 < r.dist_front_cm <= r.fsm.wall_stop_cm
+                    wifi_brake = None
+                    if r._wifi_hint:
+                        if cv_alert or (r.wifi_sensor.consecutive_drops >= 3 and wall_ahead):
+                            wifi_brake = r._wifi_hint
+
                     # Autonomous FSM Decision
                     peer_close = (r.robot_id == 2 and r2_must_yield)
                     v, omega, status = r.fsm.step(
                         now=now,
                         dist_cm=r.dist_front_cm,
                         dist_left=r.dist_left_cm,
-                        dist_right=-1,
+                        dist_right=r.dist_right_cm,  # TASK-11: real value, not hardcoded -1
                         wall_near=r.wall_near,
                         yaw_deg=r.yaw,
                         cv_alert=cv_alert,
-                        wifi_alert=None,
+                        wifi_alert=wifi_brake,
                         peer_too_close=peer_close,
                     )
+
+                    # TASK-11: don't let a yielding robot wait forever --
+                    # once the FSM reports a yield timeout, force it back
+                    # to CRUISE so it replans its own route instead of
+                    # freezing next to its sibling robot indefinitely.
+                    if status and "Yield timeout" in status:
+                        r.fsm.force_state(RobotState.CRUISE, now)
+                        v, omega = r.fsm.v_cruise, 0.0
+
+                    # TASK-08: stuck / oscillation watchdog
+                    wd_active, wd_v, wd_omega, wd_msg = r.watchdog.check(
+                        now=now, x=r.current_x, y=r.current_y,
+                        wall_present=(0 < r.dist_front_cm <= r.fsm.wall_stop_cm),
+                        fsm=r.fsm, exploration_bias=r.exploration_bias,
+                    )
+                    if wd_active:
+                        v, omega = wd_v, wd_omega
+                        status = wd_msg
 
                     # Failsafe: If robot offline, force 0 velocity
                     if r.failsafe_active:
                         v, omega = 0.0, 0.0
+
+                    r.last_v, r.last_omega = v, omega  # bugfix: HUD needs these
 
                     # Send motor command via UDP
                     if r.udp and r.limiter and r.limiter.ready():
@@ -425,18 +531,50 @@ def main() -> None:
                             dist_front_cm=r.dist_front_cm,
                             dist_left_cm=r.dist_left_cm,
                             state_name=r.fsm.state.name,
+                            failsafe_active=r.failsafe_active,  # TASK-03
                         )
                         r.current_x = r.tmap.x
                         r.current_y = r.tmap.y
+                        r.grid.mark_visited(r.current_x, r.current_y)  # TASK-05
 
                         if r.dist_front_cm > 0:
                             r.tmap.mark_wall_from_ultrasonic(r.dist_front_cm, r.yaw)
+                            r.grid.mark_ray(r.current_x, r.current_y, r.yaw, r.dist_front_cm)  # TASK-04
                             if r.fsm.state.name in ("SCAN_ROTATE", "CREEP_TO_SCAN"):
                                 r.fsm.note_sonar(r.dist_front_cm)
+                        if r.dist_left_cm > 0:
+                            r.grid.mark_ray(r.current_x, r.current_y, r.yaw + 90.0, r.dist_left_cm)
+                        if r.dist_right_cm > 0:
+                            r.grid.mark_ray(r.current_x, r.current_y, r.yaw - 90.0, r.dist_right_cm)
 
-                        if cv_source:
-                            r.tmap.mark_human(cv_source, note=cv_alert or "")
-                            r.tmap.save()
+                        # TASK-09: unique human tracker -- only draw a NEW
+                        # pin (and only count it) if it isn't the same
+                        # person already logged nearby.
+                        human_event_cls = cv_source or (wifi_brake and "wifi")
+                        if human_event_cls:
+                            offset_m = (r.dist_front_cm / 100.0) if r.dist_front_cm > 0 else 1.2
+                            yaw_rad = math.radians(r.yaw)
+                            hx = r.current_x + offset_m * math.cos(yaw_rad)
+                            hy = r.current_y + offset_m * math.sin(yaw_rad)
+                            conf = 0.5
+                            for d in dets:
+                                if d.label in ("standing", "fallen", "person"):
+                                    conf = d.confidence
+                                    break
+                            track, is_new = r.human_tracker.observe(human_event_cls, conf, hx, hy, now=now)
+                            if is_new:
+                                r.tmap.mark_human(human_event_cls, note=cv_alert or wifi_brake or "",
+                                                   override_xy=(track.x, track.y))
+                                r.tmap.save()
+                        elif r._wifi_hint:
+                            # TASK-10: an unconfirmed wifi hint still shows
+                            # on the map as '?' but never stops the robot
+                            # and never inflates human_count.
+                            offset_m = (r.dist_front_cm / 100.0) if r.dist_front_cm > 0 else 1.0
+                            yaw_rad = math.radians(r.yaw)
+                            hx = r.current_x + offset_m * math.cos(yaw_rad)
+                            hy = r.current_y + offset_m * math.sin(yaw_rad)
+                            r.tmap.mark_human("wifi", note=r._wifi_hint, override_xy=(hx, hy), is_hint=True)
 
                     # Render UI on Frame
                     vis = draw_detections(frame, dets)
@@ -473,6 +611,7 @@ def main() -> None:
                     if r.tmap:
                         r.tmap.save()
                 render_combined_swarm_map(r1, r2, combined_map_path)
+                save_merged_occupancy(r1, r2, combined_occupancy_path)  # TASK-11
 
             # ── 5. Render Sophisticated Terminal Telemetry HUD ─────────────
             dashboard.render_swarm(r1, r2, inter_robot_dist, collision_warning)
@@ -510,6 +649,7 @@ def main() -> None:
                 except Exception:
                     pass
         render_combined_swarm_map(r1, r2, combined_map_path)
+        save_merged_occupancy(r1, r2, combined_occupancy_path)  # TASK-11
         cv2.destroyAllWindows()
         log.info("Swarm controller exited cleanly.")
 
