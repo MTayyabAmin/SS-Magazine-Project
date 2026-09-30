@@ -24,7 +24,11 @@ Single-robot control loop (run once per robot with --robot 1|2):
      e. Update occupancy grid + A* frontier plan → target heading for
         CRUISE (TASK-04/05/06); fall back to FSM scan if no path.
      f. FSM step → (v, omega); failsafe and StuckWatchdog may override
-        (TASK-08).
+        (TASK-08). The chosen command plus its SOURCE (DEBUG / FSM /
+        FAILSAFE / WATCHDOG) is then written to the [CMD] attribution log
+        so a stray wheel movement can be traced after the fact. Finally the
+        DEBUG_FORCE_FORWARD flag at the top of this file, when set, forces a
+        straight-line drive and overrides everything above.
      g. Update pose/map/walls (dead-reckoning with failsafe awareness,
         TASK-03); register unique humans (TASK-09); autosave map.
      h. Send rate-limited motor command; render HUD (TASK-12) and
@@ -33,6 +37,30 @@ Single-robot control loop (run once per robot with --robot 1|2):
 """
 
 from __future__ import annotations
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DEBUG FLAGS — deliberately kept at the TOP of this file, before any code.
+# ═════════════════════════════════════════════════════════════════════════════
+# DEBUG_FORCE_FORWARD = True  →  the robot ignores every condition evaluated
+# downstream of it (FSM output, sonar / CV / WiFi decisions, the stale-
+# telemetry FAILSAFE and the stuck watchdog) and simply keeps driving
+# straight at DEBUG_FORWARD_V. Purpose: isolate drive / motor / IMU / encoder
+# problems from the navigation logic while testing on the bench.
+#
+# When it is on:
+#   * the outgoing command is forced to (DEBUG_FORWARD_V, 0.0) every tick,
+#   * allow_creep is forced True, so the ESP32's 100cm wall-near stop
+#     (US_STOP_CM) is bypassed as well,
+#   * the [CMD] attribution log records the source as "DEBUG".
+# It does NOT bypass the ESP32's <25cm hard stop (US_MIN_CM) — that one is
+# firmware-side safety and is intentionally left alone.
+#
+# WARNING: set it back to False before any normal/autonomous run. It is a
+# one-line edit on purpose — no CLI switch and no env var — so it cannot be
+# enabled by accident or by a config typo.
+DEBUG_FORCE_FORWARD: bool = True
+DEBUG_FORWARD_V: float = 1      # m/s used while DEBUG_FORCE_FORWARD is on
+# ═════════════════════════════════════════════════════════════════════════════
 
 import argparse
 import logging
@@ -50,7 +78,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils.autonomous_fsm import AutonomousFSM
 from utils.config_validation import validate_config
 from utils.tentative_map import TentativeMap
-from utils.udp_client import RateLimiter, UdpMotorClient
+from utils.udp_client import RateLimiter, UdpMotorClient, command_class
 from utils.vision import (
     FpsCounter,
     detect_humans,
@@ -228,7 +256,7 @@ def main() -> None:
         limiter = RateLimiter(robot_cfg.get("command_rate_hz", 20))
 
     fsm = AutonomousFSM(
-        v_cruise=ctrl_cfg.get("v_cruise", 0.15),
+        v_cruise=ctrl_cfg.get("v_cruise", 0.22),
         v_creep=ctrl_cfg.get("v_creep", 0.06),
         omega_scan=ctrl_cfg.get("omega_scan", 0.35),
         wall_stop_cm=robot_cfg.get("wall_stop_cm", 100),
@@ -238,6 +266,7 @@ def main() -> None:
         scan_step_deg=ctrl_cfg.get("scan_step_deg", 15),
         scan_side_deg=ctrl_cfg.get("scan_side_deg", 90),
         alert_pause_s=ctrl_cfg.get("alert_pause_s", 2.0),
+        alert_rearm_s=ctrl_cfg.get("alert_rearm_s", 3.0),
         align_tolerance_deg=ctrl_cfg.get("align_tolerance_deg", 4.0),
         creep_timeout_s=ctrl_cfg.get("creep_timeout_s", 3.0),
         center_gain=ctrl_cfg.get("center_gain", 0.0035),
@@ -293,6 +322,10 @@ def main() -> None:
     last_human_mark = 0.0
     last_map_save = 0.0
     last_v, last_omega = 0.0, 0.0
+    # [CMD] motion-attribution log bookkeeping (see udp_client.command_class).
+    last_cmd_source = "FSM"
+    last_cmd_class = "STOP"
+    last_cmd_log = 0.0
     frame_idx = 0
     last_detections: list = []
     failsafe_active = False
@@ -410,16 +443,52 @@ def main() -> None:
                 v, omega = 0.0, 0.0
 
             # TASK-08: stuck / oscillation watchdog -- can override (v, omega)
-            if tmap is not None:
+            #
+            # FIX (watchdog, 2026-09), do baatein:
+            #   * failsafe ke waqt check hi NAHI chalta — warna telemetry
+            #     drop ke beech watchdog apni recovery spin order kar sakta
+            #     tha jab motors already stopped honi chahiye thi.
+            #   * commanded_v = FSM output AFTER failsafe, BEFORE watchdog.
+            #     Pose-stuck window sirf tab age hoti hai jab robot ko
+            #     actually translate karne ko kaha gaya ho (neeche watchdog.py).
+            wd_active = False
+            if tmap is not None and not failsafe_active:
                 wd_active, wd_v, wd_omega, wd_msg = watchdog.check(
                     now=now, x=tmap.x, y=tmap.y,
                     wall_present=(0 < dist_cm <= fsm.wall_stop_cm),
                     fsm=fsm,
+                    commanded_v=v,
                 )
                 if wd_active:
                     v, omega = wd_v, wd_omega
                     status = wd_msg
                     astar_path_world, astar_wp_index = [], 0  # force a replan after recovery
+
+            # DEBUG_FORCE_FORWARD (see top of file): ignore the FSM/failsafe/
+            # watchdog result entirely and drive straight. Applied AFTER all
+            # of them so this single switch really does override everything.
+            if DEBUG_FORCE_FORWARD:
+                v, omega = DEBUG_FORWARD_V, 0.0
+
+            # Motion attribution (diagnostics): "kaun ne wheel chalayi?"
+            # Har us log line ko likho jahan command ka SOURCE ya USKA
+            # DIRECTION-CLASS badla ho, taake field mein adhuri movement ka
+            # reason log se hi mil jaye (DEBUG vs FSM vs FAILSAFE vs WATCHDOG).
+            if DEBUG_FORCE_FORWARD:
+                cmd_source = "DEBUG"
+            else:
+                cmd_source = "FAILSAFE" if failsafe_active else ("WATCHDOG" if wd_active else "FSM")
+            cmd_class = command_class(v, omega)
+            if (
+                (cmd_source != last_cmd_source or cmd_class != last_cmd_class)
+                and now - last_cmd_log >= 0.3
+            ):
+                log.info(
+                    "[CMD] %-8s %-12s v=%+.3f m/s  w=%+.3f rad/s  state=%s",
+                    cmd_source, cmd_class, v, omega, fsm.state.name,
+                )
+                last_cmd_source, last_cmd_class = cmd_source, cmd_class
+                last_cmd_log = now
 
             last_v, last_omega = v, omega
 
@@ -481,7 +550,9 @@ def main() -> None:
                 last_status_time = now
 
             if udp and limiter and limiter.ready():
-                allow_creep = fsm.state.name in (
+                # DEBUG_FORCE_FORWARD also forces allow_creep so the ESP32's
+                # 100cm wall stop cannot halt the straight-line drive.
+                allow_creep = DEBUG_FORCE_FORWARD or fsm.state.name in (
                     "CREEP_TO_SCAN", "SCAN_ROTATE", "TURN_TO_PATH", "WIFI_SCAN"
                 )
                 udp.send_command(v, omega, allow_creep=allow_creep)

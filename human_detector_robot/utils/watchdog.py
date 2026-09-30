@@ -4,12 +4,22 @@ TASK-08 -- Stuck / Oscillation Watchdog
 
 Two independent checks, both Python-only, no hardware involved:
   1. Pose watchdog: if the robot's (x, y) has barely moved for ~4s
-     WHILE a wall/obstacle is present, force a turn opposite the
-     exploration bias (break the left-right wobble / wedge-stuck case).
+     WHILE it was being commanded to translate AND a wall/obstacle is
+     present, force a turn opposite the exploration bias (break the
+     left-right wobble / wedge-stuck case).
   2. State watchdog: if the FSM has been sitting in the same state for
      more than ~8s (excluding states that are legitimately slow, like
      ALERT_PAUSE), reset it back to CRUISE so the mission keeps moving
      instead of freezing for multiple minutes.
+
+FIX (pose check, 2026-09): check 1 used to fire on "pose hasn't moved
+for 4s + wall within wall_stop_cm", WITHOUT asking whether the robot had
+even been told to move. A deliberate hold (ALERT_PAUSE, WIFI_SCAN settle,
+SCAN_ROTATE, SWARM_YIELD, failsafe) freezes (x, y) by definition, so the
+check fired every 4s for the whole run and sprayed ~1s recovery spins at
+random-looking times (54 of them in a 4-minute log). The caller now passes
+the FSM's commanded `commanded_v`; the pose window only ages while
+|commanded_v| > 0, and is restarted on every idle tick.
 
 The watchdog never touches hardware directly: it returns an override
 (v, omega) that the controller substitutes for the FSM's own output
@@ -35,6 +45,7 @@ class StuckWatchdog:
     Attributes:
         pose_stuck_timeout_s: Seconds without meaningful movement (with a
             wall present) before triggering a recovery turn (default 4.0).
+            Only counts time spent while the caller was commanding motion.
         pose_stuck_radius_m: Movement below this distance (meters) counts
             as "not moved" (default 0.03 = 3cm).
         state_timeout_s: Seconds in one FSM state before force-reset to
@@ -98,6 +109,7 @@ class StuckWatchdog:
         wall_present: bool,
         fsm: AutonomousFSM,
         exploration_bias: str = "left",
+        commanded_v: float = 0.0,
     ) -> tuple[bool, float, float, str | None]:
         """Returns (override_active, v, omega, message). If
         override_active is False, the caller should use the FSM's own
@@ -112,6 +124,11 @@ class StuckWatchdog:
             fsm: The FSM instance being supervised (read + force_state).
             exploration_bias: "left" or "right" — the recovery turn spins
                 OPPOSITE this direction to break a wedge/wobble.
+            commanded_v: Linear velocity the controller is about to send
+                this tick, i.e. the FSM output AFTER the failsafe override
+                and BEFORE this watchdog's own override. |commanded_v| > 0
+                means "the robot is being asked to translate". Pass 0.0
+                whenever motion is deliberately suppressed.
 
         Returns:
             (override_active, v, omega, message):
@@ -125,11 +142,14 @@ class StuckWatchdog:
           2. Mid-recovery (now < _recovering_until) → keep commanding the
              spin (v=0, omega=±recovery_omega) until the timer expires;
              sign is opposite the exploration bias.
-          3. Pose check: if moved > pose_stuck_radius_m from the anchor,
-             re-anchor (robot is progressing). Else if a wall is present
-             and the anchor is older than pose_stuck_timeout_s → re-anchor,
-             schedule a recovery turn ending at now + recovery_turn_s,
-             and return the spin override with a message.
+          3. Pose check — ONLY while commanded_v != 0:
+             a. |commanded_v| == 0 → the pose cannot move on purpose
+                (ALERT_PAUSE / scan / yield / failsafe), so restart the
+                anchor instead of judging a hold to be "stuck".
+             b. moved > pose_stuck_radius_m → re-anchor (progressing).
+             c. wall present AND anchor older than pose_stuck_timeout_s →
+                re-anchor, schedule a recovery turn ending at
+                now + recovery_turn_s, and return the spin override.
           4. State check: for non-exempt FSM states (ALERT_PAUSE is
              exempt), if now - fsm.state_entered_at >= state_timeout_s →
              fsm.force_state(CRUISE), re-anchor, and return a cruise
@@ -146,14 +166,20 @@ class StuckWatchdog:
             return True, 0.0, turn, "[WATCHDOG] Recovery turn in progress..."
 
         # --- Check 1: pose almost unchanged for pose_stuck_timeout_s ---
-        moved = math.hypot(x - self._anchor_x, y - self._anchor_y)
-        if moved > self.pose_stuck_radius_m:
+        if abs(commanded_v) > 1e-6:
+            moved = math.hypot(x - self._anchor_x, y - self._anchor_y)
+            if moved > self.pose_stuck_radius_m:
+                self._reset_anchor(x, y, now)
+            elif wall_present and (now - self._anchor_t) >= self.pose_stuck_timeout_s:
+                self._reset_anchor(x, y, now)
+                self._recovering_until = now + self.recovery_turn_s
+                turn = self.recovery_omega if exploration_bias != "left" else -self.recovery_omega
+                return True, 0.0, turn, "[WATCHDOG] Pose stuck near wall — forcing turn"
+        else:
+            # Not commanded to translate this tick — a frozen pose is the
+            # INTENDED behaviour, not a wedge. Restart the window so the
+            # 4s timer only measures time spent actually trying to move.
             self._reset_anchor(x, y, now)
-        elif wall_present and (now - self._anchor_t) >= self.pose_stuck_timeout_s:
-            self._reset_anchor(x, y, now)
-            self._recovering_until = now + self.recovery_turn_s
-            turn = self.recovery_omega if exploration_bias != "left" else -self.recovery_omega
-            return True, 0.0, turn, "[WATCHDOG] Pose stuck near wall — forcing turn"
 
         # --- Check 2: same FSM state too long -> reset to CRUISE ---
         if fsm.state not in _EXEMPT_STATES:

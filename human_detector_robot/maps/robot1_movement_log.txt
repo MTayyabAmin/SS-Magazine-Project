@@ -1,23 +1,29 @@
 ===========================================================================================
   ARK-5 ROBOT MOVEMENT & DIRECTION LOG (MPU6050 + ULTRASONIC DEAD-RECKONING)
   Robot ID              : #1
-  Total Distance Moved  :    15.8 cm  (0.16 meters)
-  Total Turns Executed  : 1 turns  (Cumulative rotation: 135.0°)
-  Current Heading (MPU) :  +135.0°
-  Current Position      : X =  -11.2 cm,  Y =   11.2 cm
-  Humans Located        : 7
-  Last Log Time         : 2026-09-19 14:35:43
+  Total Distance Moved  :    25.0 cm  (0.25 meters)
+  Total Turns Executed  : 0 turns  (Cumulative rotation: 0.0°)
+  Current Heading (MPU) :  +359.3°
+  Current Position      : X =   25.0 cm,  Y =   -0.0 cm
+  Humans Located        : 0
+  Last Log Time         : 2026-10-01 00:54:37
 ===========================================================================================
 [TIME]   | ACTION         | DELTA        | DETAILS                          | POSE (X, Y, YAW)          | SONAR
 ---------|----------------|--------------|----------------------------------|---------------------------|-------------------
-[14:35:10] START          | 0 cm         | Robot started at origin (0, 0)   | (   0.0cm,    0.0cm,   +0.0°) | Initial
-[14:35:11] TURN_LEFT      | +135.0°      | Turned 135.0° LEFT via MPU (State: STOP_AT_WALL) | (   0.0cm,    0.0cm, +135.0°) | F: 88cm, L:110cm
-[14:35:11] STATE_STOP_AT_ | F=88cm       | Obstacle Encounter -> STOP_AT_WALL | (   0.0cm,    0.0cm, +135.0°) | F: 88cm, L:110cm
-[14:35:11] STATE_CREEP_TO | F=88cm       | Obstacle Encounter -> CREEP_TO_SCAN | (   0.0cm,    0.0cm, +135.0°) | F: 88cm, L: 50cm
-[14:35:12] HUMAN_DETECTED | *** ALERT *** | Target (cv_standing) [CV] HUMAN STANDING  | (  -4.4cm,    4.4cm, +135.0°) | Map: (-4cm, 4cm)
-[14:35:17] HUMAN_DETECTED | *** ALERT *** | Target (cv_standing) [CV] HUMAN STANDING  | (  -8.9cm,    8.9cm, +135.0°) | Map: (-9cm, 9cm)
-[14:35:22] HUMAN_DETECTED | *** ALERT *** | Target (cv_standing) [CV] HUMAN STANDING  | ( -11.2cm,   11.2cm, +135.0°) | Map: (-11cm, 11cm)
-[14:35:27] HUMAN_DETECTED | *** ALERT *** | Target (wifi) HUMAN_POSSIBLE_BEHIN | ( -11.2cm,   11.2cm, +135.0°) | Map: (-77cm, 77cm)
-[14:35:32] HUMAN_DETECTED | *** ALERT *** | Target (wifi) HUMAN_POSSIBLE_BEHIN | ( -11.2cm,   11.2cm, +135.0°) | Map: (-77cm, 77cm)
-[14:35:37] HUMAN_DETECTED | *** ALERT *** | Target (wifi) HUMAN_POSSIBLE_BEHIN | ( -11.2cm,   11.2cm, +135.0°) | Map: (-77cm, 77cm)
-[14:35:42] HUMAN_DETECTED | *** ALERT *** | Target (cv_fallen) [CV] HUMAN FALLEN de | ( -11.2cm,   11.2cm, +135.0°) | Map: (-11cm, 11cm)
+[00:51:51] START          | 0 cm         | Robot started at origin (0, 0)   | (   0.0cm,    0.0cm,   +0.0°) | Initial
+[00:51:52] MOVE_FORWARD   | +25.0 cm     | Advanced 25.0 cm (State: STOP_AT_WALL) | (  25.0cm,   -0.0cm, +359.9°) | F: 35cm, L: -1cm
+[00:51:52] STATE_STOP_AT_ | F=35cm       | Obstacle Encounter -> STOP_AT_WALL | (  25.0cm,   -0.0cm, +359.9°) | F: 35cm, L: -1cm
+[00:51:52] STATE_CREEP_TO | F=34cm       | Obstacle Encounter -> CREEP_TO_SCAN | (  25.0cm,   -0.0cm, +359.9°) | F: 34cm, L: -1cm
+[00:51:53] STATE_SCAN_ROT | F=35cm       | Obstacle Encounter -> SCAN_ROTATE | (  25.0cm,   -0.0cm, +359.9°) | F: 35cm, L: -1cm
+[00:52:01] STATE_STOP_AT_ | F=35cm       | Obstacle Encounter -> STOP_AT_WALL | (  25.0cm,   -0.0cm,   +0.1°) | F: 35cm, L: -1cm
+[00:52:01] STATE_CREEP_TO | F=35cm       | Obstacle Encounter -> CREEP_TO_SCAN | (  25.0cm,   -0.0cm,   +0.1°) | F: 35cm, L: -1cm
+[00:52:02] STATE_SCAN_ROT | F=36cm       | Obstacle Encounter -> SCAN_ROTATE | (  25.0cm,   -0.0cm,   +0.1°) | F: 36cm, L: -1cm
+[00:52:10] STATE_STOP_AT_ | F=36cm       | Obstacle Encounter -> STOP_AT_WALL | (  25.0cm,   -0.0cm, +359.9°) | F: 36cm, L: -1cm
+[00:52:10] STATE_CREEP_TO | F=36cm       | Obstacle Encounter -> CREEP_TO_SCAN | (  25.0cm,   -0.0cm, +359.9°) | F: 36cm, L: -1cm
+[00:52:11] STATE_SCAN_ROT | F=36cm       | Obstacle Encounter -> SCAN_ROTATE | (  25.0cm,   -0.0cm, +359.8°) | F: 36cm, L: -1cm
+[00:52:19] STATE_STOP_AT_ | F=35cm       | Obstacle Encounter -> STOP_AT_WALL | (  25.0cm,   -0.0cm, +359.6°) | F: 35cm, L: -1cm
+[00:52:19] STATE_CREEP_TO | F=35cm       | Obstacle Encounter -> CREEP_TO_SCAN | (  25.0cm,   -0.0cm, +359.5°) | F: 35cm, L: -1cm
+[00:52:20] STATE_SCAN_ROT | F=36cm       | Obstacle Encounter -> SCAN_ROTATE | (  25.0cm,   -0.0cm, +359.7°) | F: 36cm, L: -1cm
+[00:52:28] STATE_STOP_AT_ | F=36cm       | Obstacle Encounter -> STOP_AT_WALL | (  25.0cm,   -0.0cm, +359.3°) | F: 36cm, L: -1cm
+[00:52:28] STATE_CREEP_TO | F=36cm       | Obstacle Encounter -> CREEP_TO_SCAN | (  25.0cm,   -0.0cm, +359.3°) | F: 36cm, L: -1cm
+[00:52:29] STATE_SCAN_ROT | F=35cm       | Obstacle Encounter -> SCAN_ROTATE | (  25.0cm,   -0.0cm, +359.3°) | F: 35cm, L: -1cm

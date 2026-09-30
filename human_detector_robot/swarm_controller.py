@@ -65,7 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from utils.autonomous_fsm import AutonomousFSM, RobotState
 from utils.config_validation import validate_config
 from utils.tentative_map import TentativeMap
-from utils.udp_client import RateLimiter, UdpMotorClient
+from utils.udp_client import RateLimiter, UdpMotorClient, command_class
 from utils.vision import (
     FpsCounter,
     detect_humans,
@@ -122,6 +122,8 @@ class RobotContext:
         last_v/last_omega: Latest commanded velocities — required by
             terminal_hud.render_swarm(); never set here, assigned in the
             control loop (bugfix comment in-class).
+        last_cmd_source/last_cmd_class/last_cmd_log: Bookkeeping for the
+            [CMD] motion-attribution log written each control loop.
         _wifi_hint: TASK-10 raw WiFi hint before brake-worthiness gating.
     """
 
@@ -185,6 +187,11 @@ class RobotContext:
     # assigning them below fixes it.
     last_v: float = 0.0
     last_omega: float = 0.0
+    # [CMD] motion-attribution log bookkeeping (source/direction-class of
+    # the last logged command + its timestamp for the 0.3s rate limit).
+    last_cmd_source: str = "FSM"
+    last_cmd_class: str = "STOP"
+    last_cmd_log: float = 0.0
     # TASK-10: latest raw wifi hint (before brake-worthiness gating)
     _wifi_hint: str | None = None
 
@@ -513,7 +520,7 @@ def main() -> None:
             r.limiter = RateLimiter(robot_cfg.get("command_rate_hz", 20))
 
         r.fsm = AutonomousFSM(
-            v_cruise=ctrl_cfg.get("v_cruise", 0.15),
+            v_cruise=ctrl_cfg.get("v_cruise", 0.22),
             v_creep=ctrl_cfg.get("v_creep", 0.06),
             omega_scan=ctrl_cfg.get("omega_scan", 0.35),
             wall_stop_cm=robot_cfg.get("wall_stop_cm", 100),
@@ -523,6 +530,7 @@ def main() -> None:
             scan_step_deg=ctrl_cfg.get("scan_step_deg", 15),
             scan_side_deg=ctrl_cfg.get("scan_side_deg", 90),
             alert_pause_s=ctrl_cfg.get("alert_pause_s", 2.0),
+            alert_rearm_s=ctrl_cfg.get("alert_rearm_s", 3.0),
             exploration_bias=r.exploration_bias,
             align_tolerance_deg=ctrl_cfg.get("align_tolerance_deg", 4.0),
             creep_timeout_s=ctrl_cfg.get("creep_timeout_s", 3.0),
@@ -679,19 +687,51 @@ def main() -> None:
                         r.fsm.force_state(RobotState.CRUISE, now)
                         v, omega = r.fsm.v_cruise, 0.0
 
-                    # TASK-08: stuck / oscillation watchdog
-                    wd_active, wd_v, wd_omega, wd_msg = r.watchdog.check(
-                        now=now, x=r.current_x, y=r.current_y,
-                        wall_present=(0 < r.dist_front_cm <= r.fsm.wall_stop_cm),
-                        fsm=r.fsm, exploration_bias=r.exploration_bias,
-                    )
-                    if wd_active:
-                        v, omega = wd_v, wd_omega
-                        status = wd_msg
-
-                    # Failsafe: If robot offline, force 0 velocity
+                    # Failsafe: If robot offline, force 0 velocity.
+                    # Applied BEFORE the watchdog so a stale-telemetry
+                    # window can never order a recovery spin while the
+                    # motors are supposed to be held stopped (mirrors
+                    # main_controller).
                     if r.failsafe_active:
                         v, omega = 0.0, 0.0
+
+                    # TASK-08: stuck / oscillation watchdog.
+                    # commanded_v = the FSM output AFTER failsafe, so the
+                    # pose-stuck window only ages while the robot is being
+                    # told to translate (see StuckWatchdog.check docstring).
+                    # With --no-map the pose never updates, so judging it
+                    # "stuck" would be meaningless: commanded_v is forced
+                    # to 0 (pose check parked) while the STATE-timeout
+                    # check keeps running as before.
+                    wd_active = False
+                    if not r.failsafe_active:
+                        wd_active, wd_v, wd_omega, wd_msg = r.watchdog.check(
+                            now=now, x=r.current_x, y=r.current_y,
+                            wall_present=(0 < r.dist_front_cm <= r.fsm.wall_stop_cm),
+                            fsm=r.fsm, exploration_bias=r.exploration_bias,
+                            commanded_v=(v if r.tmap is not None else 0.0),
+                        )
+                        if wd_active:
+                            v, omega = wd_v, wd_omega
+                            status = wd_msg
+
+                    # Motion attribution: "kaun ne wheel chalayi?" — log the
+                    # command source + direction class whenever either
+                    # changes (rate-limited so centering jitter can't spam).
+                    cmd_source = "FAILSAFE" if r.failsafe_active else (
+                        "WATCHDOG" if wd_active else "FSM"
+                    )
+                    cmd_class = command_class(v, omega)
+                    if (
+                        (cmd_source != r.last_cmd_source or cmd_class != r.last_cmd_class)
+                        and now - r.last_cmd_log >= 0.3
+                    ):
+                        log.info(
+                            "[%s] [CMD] %-8s %-12s v=%+.3f m/s  w=%+.3f rad/s  state=%s",
+                            r.name, cmd_source, cmd_class, v, omega, r.fsm.state.name,
+                        )
+                        r.last_cmd_source, r.last_cmd_class = cmd_source, cmd_class
+                        r.last_cmd_log = now
 
                     r.last_v, r.last_omega = v, omega  # bugfix: HUD needs these
 

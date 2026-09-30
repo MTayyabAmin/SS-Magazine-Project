@@ -17,6 +17,10 @@ Algorithm Overview:
      discover the robot.
   3. poll_telemetry() tries the telemetry socket first, then the command
      socket; any sender with a different IP updates self.host (DHCP-proof).
+
+Also exports command_class(), a small pure helper that labels a (v, omega)
+pair as STOP/FWD/REV/TURN_L/TURN_R for the controllers' [CMD]
+motion-attribution log.
 """
 
 from __future__ import annotations
@@ -29,6 +33,34 @@ import time
 from dataclasses import dataclass, field
 
 _log = logging.getLogger("ark5.udp")
+
+
+def command_class(v: float, omega: float, v_deadband: float = 0.01, w_deadband: float = 0.05) -> str:
+    """Coarse label for what a motor command actually asks the robot to do.
+
+    Shared by main_controller and swarm_controller for the [CMD]
+    motion-attribution log: it answers "were the wheels told to STOP, go
+    FWD, go BACK or TURN, and which way?" without the label changing on
+    every tiny omega jitter produced by corridor centering.
+
+    Args:
+        v: Linear velocity in m/s (positive = forward).
+        omega: Angular velocity in rad/s (positive = CCW/left).
+        v_deadband: |v| at or below this counts as "no linear motion".
+        w_deadband: |omega| at or below this counts as "no rotation" —
+            sized just under `control.center_omega_max` (0.15) so ordinary
+            centering wobble does not spam the log.
+
+    Returns:
+        One of "STOP", "FWD", "REV", "TURN_L", "TURN_R", or a "+"
+        combination when both motions are requested (e.g. "FWD+TURN_L").
+    """
+    parts: list[str] = []
+    if abs(v) >= v_deadband:
+        parts.append("FWD" if v > 0 else "REV")
+    if abs(omega) >= w_deadband:
+        parts.append("TURN_L" if omega > 0 else "TURN_R")
+    return "+".join(parts) if parts else "STOP"
 
 
 @dataclass

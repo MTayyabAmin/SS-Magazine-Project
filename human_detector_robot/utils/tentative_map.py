@@ -105,7 +105,10 @@ class TentativeMap:
 
     # TASK-03: last front-sonar reading, used to sanity-check that
     # commanded motion actually matches what the ultrasonic sees
-    _last_dist_front_cm: int = -1
+    # TASK-03: dedicated anchors for the 10cm plausibility check
+    _anchor_x: float = 0.0
+    _anchor_y: float = 0.0
+    _anchor_dist_cm: int = -1
     frozen_last_tick: bool = False
 
     # Grid cells: (gx, gy) -> char
@@ -228,11 +231,10 @@ class TentativeMap:
         Now (x, y) only advances when ALL of these hold:
           (a) failsafe is not active,
           (b) the robot is actually being commanded to move (|v| > 0),
-          (c) the front sonar trend agrees with that motion -- distance
-              should SHRINK while creeping/cruising forward and GROW
-              while reversing. If the sonar disagrees (e.g. distance
-              stayed flat/grew while "moving forward"), we don't trust
-              the commanded velocity and freeze position this tick.
+          (c) the front sonar trend agrees with that motion. We track an
+              anchor over 10cm of expected travel. If the sonar doesn't
+              shrink by at least 2cm over that 10cm of forward travel, we
+              assume the robot is physically stuck and freeze position.
         Yaw and logging still update every tick regardless.
 
         Args:
@@ -248,11 +250,11 @@ class TentativeMap:
         Algorithm:
           1. Compute dt since last call, capped at 0.25s to prevent jumps.
           2. Store yaw as the new heading; convert to radians.
-          3. TASK-03 plausibility check: if both current and previous front
-             readings are valid, compare the distance delta against the
-             commanded direction with a +/-5cm tolerance. Contradictions
-             (e.g. commanded forward but distance grew by >5cm) mark the
-             motion implausible.
+          3. TASK-03 plausibility check: track an anchor position. When the
+             expected motion reaches 10cm, verify that the front sonar
+             decreased (if moving forward) by at least 2cm. Contradictions
+             (e.g. didn't shrink) mark the motion implausible and freeze
+             the map, allowing the stuck watchdog to rescue the robot.
           4. can_move = not failsafe AND |v| > 0 AND motion plausible;
              record frozen_last_tick = not can_move.
           5. If can_move: ds = v*dt; accumulate total_distance_cm; advance
@@ -269,16 +271,47 @@ class TentativeMap:
         yaw_rad = math.radians(yaw_deg)
 
         # TASK-03: verify commanded motion against sonar trend
+        # Instead of a tick-to-tick check (which is always ~0cm and fails to catch
+        # a stuck robot), we anchor the pose and wait for 10cm of expected travel.
+        # If the sonar doesn't shrink by at least 2cm over that 10cm, we are stuck.
         motion_plausible = True
-        if dist_front_cm > 0 and self._last_dist_front_cm > 0:
-            delta = dist_front_cm - self._last_dist_front_cm
-            tolerance_cm = 5.0
-            if v > 0 and delta > tolerance_cm:
-                motion_plausible = False  # told to go forward, sonar says we didn't
-            elif v < 0 and delta < -tolerance_cm:
-                motion_plausible = False  # told to reverse, sonar says we didn't
-        if dist_front_cm > 0:
-            self._last_dist_front_cm = dist_front_cm
+        
+        # Reset anchor if not moving linearly, BUT only if we actually turned!
+        # If we are stuck, the watchdog will command a recovery turn (v=0, omega>0).
+        # If the physical robot doesn't turn, yaw won't change. We shouldn't reset
+        # the anchor unless the yaw actually changed, otherwise we'll accumulate
+        # another 10cm of fake distance after every watchdog trigger!
+        yaw_changed = True
+        if hasattr(self, '_anchor_yaw'):
+            diff = (yaw_deg - self._anchor_yaw + 180) % 360 - 180
+            yaw_changed = abs(diff) > 5.0
+            
+        if (abs(v) < 1e-6 and yaw_changed) or failsafe_active:
+            self._anchor_dist_cm = dist_front_cm
+            self._anchor_x = self.x
+            self._anchor_y = self.y
+            self._anchor_yaw = yaw_deg
+            
+        if dist_front_cm > 0 and self._anchor_dist_cm > 0:
+            expected_dist_cm = math.hypot(self.x - self._anchor_x, self.y - self._anchor_y) * 100.0
+            if expected_dist_cm >= 10.0:
+                delta = dist_front_cm - self._anchor_dist_cm
+                if v > 0 and delta > -2.0:
+                    motion_plausible = False  # told to go forward 10cm, but sonar didn't shrink by even 2cm
+                elif v < 0 and delta < 2.0:
+                    motion_plausible = False  # told to reverse 10cm, but sonar didn't grow by even 2cm
+                    
+                if motion_plausible:
+                    # Real motion! Re-anchor for the next 10cm segment.
+                    self._anchor_dist_cm = dist_front_cm
+                    self._anchor_x = self.x
+                    self._anchor_y = self.y
+                    self._anchor_yaw = yaw_deg
+        elif dist_front_cm > 0:
+            self._anchor_dist_cm = dist_front_cm
+            self._anchor_x = self.x
+            self._anchor_y = self.y
+            self._anchor_yaw = yaw_deg
 
         can_move = (not failsafe_active) and abs(v) > 1e-6 and motion_plausible
         self.frozen_last_tick = not can_move

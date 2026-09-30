@@ -70,7 +70,7 @@ wifi_sensing:
   rssi_drop_threshold_dbm: 8.0
 
 control:
-  v_cruise: 0.15
+  v_cruise: 0.22              # was 0.15 -- floor that clears the drive deadzone
   v_creep: 0.06              # slow forward to 30-40cm scan standoff
   omega_scan: 0.35            # smooth L-turn rotation speed
   scan_standoff_min_cm: 30    # min distance from wall when scanning
@@ -79,6 +79,10 @@ control:
   scan_step_deg: 15           # sample sonar every N degrees while robot rotates
   scan_side_deg: 90           # scan 90° LEFT + 90° RIGHT (T-junction both sides)
   alert_pause_s: 2.0          # pause after human detect, then continue
+  # One sighting = ONE pause: ALERT_PAUSE re-arms only after the alert has
+  # been continuously clear for this many seconds (stops the pause→creep
+  # ping-pong that made the wheels twitch every alert_pause_s).
+  alert_rearm_s: 3.0
   show_preview: true
   # TASK-07 (D4 -- FSM: Path Follow + Junctions)
   align_tolerance_deg: 4.0    # was 8.0 -- tighter alignment before cruising

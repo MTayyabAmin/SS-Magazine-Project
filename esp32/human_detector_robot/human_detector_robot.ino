@@ -33,6 +33,14 @@ float         yawRad       = 0.0f;
 float         headingInteg = 0.0f;
 unsigned long lastImuUs    = 0;
 
+// FIX (yaw corruption): gyro-only yaw + stationary bias estimator state.
+// See the YAW_BIAS_* block in config.h for why accel heading was dropped.
+float         gyroBiasDps  = 0.0f;   // current zero-rate bias estimate (dps)
+float         biasAccumDps = 0.0f;   // bootstrap: sum of stationary samples
+uint16_t      biasSamples  = 0;      // bootstrap: sample count
+unsigned long biasStartMs  = 0;      // when the bootstrap window began (0 = not started)
+bool          biasReady    = false;  // bootstrap mean computed at least once
+
 int           distFrontCm  = -1;
 int           distLeftCm   = -1;
 int           distRightCm  = -1;
@@ -75,6 +83,10 @@ static bool mpuInit() {
   return true;
 }
 
+// FIX (yaw corruption, 2026-09): gyro-only integration + stationary bias
+// estimator. Accelerometer heading atan2f(-ay, ax) bilkul drop kar diya gaya
+// hai — wo tilt par depend karta tha aur yaw ko seconds mein 100°+ ulta kar
+// deta tha (see YAW_BIAS_* in config.h).
 static void updateYaw() {
   unsigned long nowUs = micros();
   if (lastImuUs == 0) { lastImuUs = nowUs; return; }
@@ -83,16 +95,36 @@ static void updateYaw() {
   if (dt <= 0.0f || dt > 0.5f) return;
 
   int16_t gzRaw = mpuRead16(REG_GYRO_X + 4);
-  float gz = (float)gzRaw / 131.0f;
-  float gyroYaw = yawRad + (gz * DEG_TO_RAD) * dt;
+  float gzDps = (float)gzRaw / 131.0f;
 
-  int16_t axRaw = mpuRead16(REG_ACCEL_X);
-  int16_t ayRaw = mpuRead16(REG_ACCEL_X + 2);
-  float ax = (float)axRaw / 16384.0f;
-  float ay = (float)ayRaw / 16384.0f;
-  float accelYaw = atan2f(-ay, ax);
+  // Stationary gate: jab tak robot ko translate/rotate nahi kaha ja raha,
+  // gyro ka output sirf zero-rate offset (bias) hona chahiye — is window ka
+  // use karke bias estimate karte hain.
+  bool stationary = (fabsf(cmdV) <= YAW_BIAS_STATIONARY_V) &&
+                    (fabsf(cmdOmega) <= YAW_BIAS_STATIONARY_W);
 
-  yawRad = IMU_ALPHA * gyroYaw + (1.0f - IMU_ALPHA) * accelYaw;
+  if (stationary) {
+    if (!biasReady) {
+      if (biasStartMs == 0) biasStartMs = millis();
+      biasAccumDps += gzDps;
+      biasSamples++;
+      if ((millis() - biasStartMs) >= YAW_BIAS_BOOTSTRAP_MS) {
+        gyroBiasDps = biasAccumDps / (float)biasSamples;
+        biasReady   = true;
+      }
+    } else {
+      // Bahut dheere drift track karte hain (har sample par 0.001).
+      gyroBiasDps += YAW_BIAS_TRACK_ALPHA * (gzDps - gyroBiasDps);
+    }
+  } else if (!biasReady) {
+    // Stationary window toot gayi bootstrap ke beech — dobara se start karo
+    // taake purane (jagah/pose ke) samples ka mean na ban jaaye.
+    biasStartMs  = 0;
+    biasAccumDps = 0.0f;
+    biasSamples  = 0;
+  }
+
+  yawRad += (gzDps - gyroBiasDps) * DEG_TO_RAD * dt;
   while (yawRad >  (float)M_PI) yawRad -= 2.0f * (float)M_PI;
   while (yawRad < -(float)M_PI) yawRad += 2.0f * (float)M_PI;
 }
@@ -118,9 +150,16 @@ static void updateUltrasonic() {
   if (now - lastUsMs < US_SAMPLE_INTERVAL_MS) return;
   lastUsMs = now;
 
+  // Sensor roles (FIX in config.h): FRONT = GPIO5/15, RIGHT = GPIO18/19.
+  // Left sensor nahi laga → US_USE_LEFT 0 → distLeftCm hamesha -1 rahega
+  // (Python corridor centering ko wahi -1 band kar deta hai).
   distFrontCm = readUltrasonicCm(PIN_US_F_TRIG, PIN_US_F_ECHO);
+#if US_USE_LEFT
   delayMicroseconds(500);
   distLeftCm  = readUltrasonicCm(PIN_US_L_TRIG, PIN_US_L_ECHO);
+#else
+  distLeftCm  = -1;
+#endif
 #if US_USE_RIGHT
   delayMicroseconds(500);
   distRightCm = readUltrasonicCm(PIN_US_R_TRIG, PIN_US_R_ECHO);
@@ -283,6 +322,7 @@ static void setupWiFi() {
   while (WiFi.status() != WL_CONNECTED && attempts < 40) {
     delay(500);
     Serial.print(".");
+    WiFi.begin(STA_SSID, STA_PASSWORD);
     attempts++;
   }
   if (WiFi.status() == WL_CONNECTED) {
@@ -307,10 +347,14 @@ void setup() {
   pinMode(PIN_IN2, OUTPUT);
   pinMode(PIN_IN3, OUTPUT);
   pinMode(PIN_IN4, OUTPUT);
+  // Sensor pin modes follow the same US_USE_* guards as updateUltrasonic()
+  // (left slot reserved/unused by default — see config.h FIX note).
   pinMode(PIN_US_F_TRIG, OUTPUT);
-  pinMode(PIN_US_L_TRIG, OUTPUT);
   pinMode(PIN_US_F_ECHO, INPUT);
+#if US_USE_LEFT
+  pinMode(PIN_US_L_TRIG, OUTPUT);
   pinMode(PIN_US_L_ECHO, INPUT);
+#endif
 #if US_USE_RIGHT
   pinMode(PIN_US_R_TRIG, OUTPUT);
   pinMode(PIN_US_R_ECHO, INPUT);
@@ -382,8 +426,11 @@ void loop() {
   if ((now - lastSerialMs) >= 1000) {
     lastSerialMs = now;
     const char* mState = (cmdV > 0.02) ? "FWD" : ((cmdV < -0.02) ? "REV" : ((abs(cmdOmega) > 0.1) ? "TURN" : "STOP"));
-    Serial.printf("[ROBOT #%d] Motors: %-4s (v=%.2f, w=%.2f) | Sonar Front: %3dcm, Left: %3dcm | MPU Yaw: %+5.1f deg\n",
-                  ROBOT_ID, mState, cmdV, cmdOmega, distFrontCm, distLeftCm, yawRad * RAD_TO_DEG);
+    // Sensor roles: FRONT + RIGHT (config.h FIX) — left slot is reserved and
+    // would always print -1, so it is not shown.
+    Serial.printf("[ROBOT #%d] Motors: %-4s (v=%.2f, w=%.2f) | Sonar Front: %3dcm, Right: %3dcm | MPU Yaw: %+5.1f deg | Bias: %+5.2fdps%s\n",
+                  ROBOT_ID, mState, cmdV, cmdOmega, distFrontCm, distRightCm,
+                  yawRad * RAD_TO_DEG, gyroBiasDps, biasReady ? "" : " (boot)");
   }
 
   yield();

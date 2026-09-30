@@ -27,6 +27,14 @@ TASK-07 (D4 -- FSM: Path Follow + Junctions) changes vs the original:
 TASK-11: SWARM_YIELD now times out after yield_timeout_s and reports
 "[SWARM] Yield timeout — requesting replan" so the caller can force a
 state change instead of yielding forever.
+
+FIX (alert re-arm, 2026-09): ALERT_PAUSE used to re-enter itself on every
+tick in which a human stayed in frame — pause 2s → 1 tick of creep →
+pause 2s → ... A single continuously-visible survivor therefore produced
+~72 "[MAP] Human logged" entries and a ~50-150ms wheel pulse every 2s
+(the "random small rotations"). A pause now LATCHES: it re-arms only after
+the alert has been clear for `alert_rearm_s` seconds, so one sighting ==
+one pause and the FSM genuinely resumes the pre-alert activity.
 """
 
 from __future__ import annotations
@@ -76,6 +84,8 @@ class AutonomousFSM:
         scan_step_deg: Degrees between sonar samples during scan.
         scan_side_deg: Degrees to sweep on each side (left and right).
         alert_pause_s: Duration of human-detection pause (seconds).
+        alert_rearm_s: Seconds the alert must stay clear before the same
+            (or a new) detection may trigger a fresh ALERT_PAUSE.
         exploration_bias: 'left'/'right' priority for multi-robot divergence.
         align_tolerance_deg: TASK-07 — TURN_TO_PATH alignment tolerance (was 8, now 4).
         creep_timeout_s: TASK-07 — max seconds in CREEP_TO_SCAN before forcing scan.
@@ -90,11 +100,15 @@ class AutonomousFSM:
         _scan_samples: (relative_deg, distance_cm) pairs collected during SCAN_ROTATE.
         _target_heading: Absolute heading to align to in TURN_TO_PATH.
         chosen_direction: Human-readable label of the chosen direction.
+        _alert_latched: True from the moment an ALERT_PAUSE fires until the
+            alert has been clear for alert_rearm_s — blocks re-triggering.
+        _alert_clear_since: Timestamp at which the alert last went absent
+            (None while an alert is present).
     """
 
     def __init__(
         self,
-        v_cruise: float = 0.15,
+        v_cruise: float = 0.22,
         v_creep: float = 0.06,
         omega_scan: float = 0.35,
         wall_stop_cm: int = 100,
@@ -104,6 +118,7 @@ class AutonomousFSM:
         scan_step_deg: float = 15.0,
         scan_side_deg: float = 90.0,
         alert_pause_s: float = 2.0,
+        alert_rearm_s: float = 3.0,
         exploration_bias: str = "left",  # "left" for Robot 1, "right" for Robot 2 (max area coverage)
         align_tolerance_deg: float = 4.0,   # TASK-07: was 8, now 4 (tighter align)
         creep_timeout_s: float = 3.0,       # TASK-07: abort creep if standoff not reached
@@ -127,6 +142,8 @@ class AutonomousFSM:
             scan_step_deg: Degrees between consecutive sonar samples in scan.
             scan_side_deg: Degrees to sweep on each side from center.
             alert_pause_s: Seconds to pause when a human is detected.
+            alert_rearm_s: Seconds the alert must remain absent before a
+                fresh ALERT_PAUSE may fire again (one sighting = one pause).
             exploration_bias: 'left' or 'right' junction preference (multi-robot).
             align_tolerance_deg: TASK-07 — degrees of error allowed to call
                 TURN_TO_PATH "aligned".
@@ -152,6 +169,7 @@ class AutonomousFSM:
         self.scan_step_deg = scan_step_deg
         self.scan_side_deg = scan_side_deg
         self.alert_pause_s = alert_pause_s
+        self.alert_rearm_s = alert_rearm_s
         self.exploration_bias = exploration_bias  # left or right priority
         self.align_tolerance_deg = align_tolerance_deg
         self.creep_timeout_s = creep_timeout_s
@@ -172,6 +190,12 @@ class AutonomousFSM:
         self.last_sonar_sample: int = -1
         self._pre_alert_state: RobotState = RobotState.CRUISE
         self.chosen_direction: str = ""
+
+        # FIX (alert re-arm): latch + clear-timestamp for ALERT_PAUSE, so a
+        # human who stays in frame cannot re-trigger the pause every
+        # alert_pause_s. See the module docstring.
+        self._alert_latched: bool = False
+        self._alert_clear_since: float | None = None
 
         # TASK-08 (watchdog) hooks -- main_controller/watchdog.py reads
         # these to detect "stuck in the same state too long".
@@ -351,8 +375,9 @@ class AutonomousFSM:
         Algorithm (priority order):
           1. SWARM_YIELD: if peer too close, enter yield state, turn in place;
              after yield_timeout_s return a "replan" request message (TASK-11).
-          2. ALERT_PAUSE: on cv/wifi alert, pause for alert_pause_s then resume
-             the pre-alert activity.
+          2. ALERT_PAUSE: on a NEW cv/wifi alert (not currently latched),
+             pause for alert_pause_s then resume the pre-alert activity;
+             re-arms only after the alert has been clear for alert_rearm_s.
           3. CRUISE: stop on wall_near or 0<dist<=wall_stop; otherwise drive
              v_cruise with corridor centering omega (left-right sonar balance)
              plus A* heading steering when target_heading_deg is given.
@@ -387,14 +412,31 @@ class AutonomousFSM:
             yield_turn = 0.35 if self.exploration_bias == "left" else -0.35
             return 0.0, yield_turn, "[SWARM] Still yielding to peer robot..."
 
-        # Human detection takes precedence over every non-yield state
-        if cv_alert or wifi_alert:
-            if self.state != RobotState.ALERT_PAUSE:
-                self.alert_message = cv_alert or wifi_alert
-                self.human_detected_this_stop = True
-                self._pre_alert_state = self.state
-                self._enter(RobotState.ALERT_PAUSE, now)
-                return 0.0, 0.0, self.alert_message
+        # Human detection takes precedence over every non-yield state.
+        #
+        # FIX (alert re-arm): pehle yeh block har us tick par chalta tha jisme
+        # cv_alert/wifi_alert set ho — pause khatam hote hi wapas ALERT_PAUSE.
+        # Ek hi insaan frame mein rehne par ~72 "Human logged" cycles bante
+        # the aur har cycle ke beech ek tick ka creep pulse (v_creep) jaata
+        # tha — yehi "random chhoti wheel movement" tha. Ab pause LATCH hota
+        # hai: dobara tabhi trigger hota hai jab alert lagataar
+        # `alert_rearm_s` seconds tak clear ho chuka ho.
+        alert_now = bool(cv_alert or wifi_alert)
+        if alert_now:
+            self._alert_clear_since = None
+        else:
+            if self._alert_clear_since is None:
+                self._alert_clear_since = now
+            elif self._alert_latched and (now - self._alert_clear_since) >= self.alert_rearm_s:
+                self._alert_latched = False
+
+        if alert_now and not self._alert_latched and self.state != RobotState.ALERT_PAUSE:
+            self.alert_message = cv_alert or wifi_alert
+            self.human_detected_this_stop = True
+            self._pre_alert_state = self.state
+            self._alert_latched = True
+            self._enter(RobotState.ALERT_PAUSE, now)
+            return 0.0, 0.0, self.alert_message
 
         if self.state == RobotState.ALERT_PAUSE:
             if self._elapsed(now) >= self.alert_pause_s:

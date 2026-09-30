@@ -137,11 +137,32 @@ def test_task07_fsm() -> None:
     f.step(0.1, 999, -1, -1, False, 20.0, None, None)
     check("TASK-07 SCAN_ROTATE has no early-exit", f.state == RobotState.SCAN_ROTATE)
 
+    # FIX (alert re-arm): ek sighting = EK hi pause. Pehle yeh block har tick
+    # par chalta tha, is liye human frame mein rehne par ~72 pause/creep
+    # cycles bante the (har cycle ke beech ek v_creep pulse = wheel twitch).
+    f = AutonomousFSM(alert_pause_s=2.0, alert_rearm_s=3.0)
+    _, _, msg = f.step(0.0, 300, -1, -1, False, 0.0, "[CV] PERSON", None)
+    entered = f.state == RobotState.ALERT_PAUSE and msg is not None
+    f.step(2.1, 300, -1, -1, False, 0.0, "[CV] PERSON", None)
+    exited = f.state != RobotState.ALERT_PAUSE
+    f.step(5.0, 300, -1, -1, False, 0.0, "[CV] PERSON", None)
+    held = f.state != RobotState.ALERT_PAUSE
+    f.step(5.1, 300, -1, -1, False, 0.0, None, None)
+    f.step(8.2, 300, -1, -1, False, 0.0, None, None)
+    f.step(8.3, 300, -1, -1, False, 0.0, "[CV] PERSON", None)
+    rearmed = f.state == RobotState.ALERT_PAUSE
+    check("TASK-07 alert pauses ONCE while human stays in frame",
+          entered and exited and held)
+    check("TASK-07 alert re-arms only after alert_rearm_s of clear", rearmed)
+
 
 def test_task08_watchdog() -> None:
+    # FIX (watchdog pose gate): the pose window only ages while the caller
+    # is actually commanding translation, so every call below passes
+    # commanded_v explicitly (it defaults to 0.0 = "deliberate hold").
     wd, fsm = StuckWatchdog(pose_stuck_timeout_s=4.0), AutonomousFSM()
-    wd.check(0.0, 1.0, 1.0, True, fsm)
-    active, _, omega, _ = wd.check(4.5, 1.001, 1.0, True, fsm)
+    wd.check(0.0, 1.0, 1.0, True, fsm, commanded_v=0.15)
+    active, _, omega, _ = wd.check(4.5, 1.001, 1.0, True, fsm, commanded_v=0.15)
     check("TASK-08 pose-stuck near wall forces a turn", active and omega != 0.0)
 
     wd2, fsm2 = StuckWatchdog(state_timeout_s=8.0, pose_stuck_timeout_s=999), AutonomousFSM()
@@ -150,9 +171,43 @@ def test_task08_watchdog() -> None:
     check("TASK-08 same state > 8s resets to CRUISE", active and fsm2.state == RobotState.CRUISE)
 
     wd3, fsm3 = StuckWatchdog(pose_stuck_timeout_s=4.0), AutonomousFSM()
-    wd3.check(0.0, 0.0, 0.0, True, fsm3)
-    active, *_ = wd3.check(4.5, 0.5, 0.0, True, fsm3)
+    wd3.check(0.0, 0.0, 0.0, True, fsm3, commanded_v=0.15)
+    active, *_ = wd3.check(4.5, 0.5, 0.0, True, fsm3, commanded_v=0.15)
     check("TASK-08 moving robot does not false-trigger", not active)
+
+    # THE BUG: a deliberately held robot (ALERT_PAUSE / scan / failsafe)
+    # must never be judged "stuck", no matter how long the pose freezes.
+    wd4, fsm4 = StuckWatchdog(pose_stuck_timeout_s=4.0, state_timeout_s=999), AutonomousFSM()
+    fsm4._enter(RobotState.ALERT_PAUSE, 0.0)
+    wd4.check(0.0, 1.0, 1.0, True, fsm4, commanded_v=0.0)
+    active, *_ = wd4.check(100.0, 1.0, 1.0, True, fsm4, commanded_v=0.0)
+    check("TASK-08 idle robot (commanded_v=0) never pose-triggers", not active)
+
+    # ...and the window must not carry over from the idle period: after the
+    # hold ends, a fresh 4s of commanded motion is required.
+    active, *_ = wd4.check(100.5, 1.0, 1.0, True, fsm4, commanded_v=0.15)
+    check("TASK-08 window restarts when motion resumes", not active)
+
+    src = (ROOT / "main_controller.py").read_text(encoding="utf-8")
+    check("TASK-08 controller hands commanded_v to the watchdog", "commanded_v=v" in src)
+    check("TASK-08 watchdog never runs while failsafe is active",
+          "not failsafe_active" in src)
+
+
+# ---------------- Debug harness safety ----------------
+def test_debug_force_forward_flag() -> None:
+    """DEBUG_FORCE_FORWARD must ship DISABLED and stay at the top of the file.
+
+    The flag bypasses the failsafe and the wall stop, so committing it as
+    True would make the next run drive blind — this guards against that.
+    """
+    src = (ROOT / "main_controller.py").read_text(encoding="utf-8")
+    flag_def = "DEBUG_FORCE_FORWARD: bool = False"
+    pos = src.find(flag_def)
+    check("DEBUG-FLAG defined and ships as False", pos != -1)
+    check("DEBUG-FLAG declared at the top (before any def)",
+          pos != -1 and pos < src.find("def "))
+    check("DEBUG-FLAG actually forces the outgoing command", "DEBUG_FORWARD_V, 0.0" in src)
 
 
 # ---------------- D5: rescue + swarm ----------------
@@ -223,6 +278,7 @@ def main() -> int:
         test_task01_sonar_filter, test_task02_yaw_guard, test_task03_honest_pose,
         test_task04_05_grid, test_task06_astar, test_task07_fsm, test_task08_watchdog,
         test_task09_tracker, test_task10_wifi_hint, test_task11_swarm, test_task12_hud,
+        test_debug_force_forward_flag,
     ):
         try:
             fn()
