@@ -1,5 +1,5 @@
-﻿/*
- * ╔══════════════════════════════════════════════════════════════════╗
+﻿#include <Arduino.h>
+/* ╔══════════════════════════════════════════════════════════════════╗
  * ║       ARK-5  Step 4 — Dedicated L298N Motor Test                ║
  * ║   Tests 4x DC Motors via L298N Dual H-Bridge Driver             ║
  * ╠══════════════════════════════════════════════════════════════════╣
@@ -17,19 +17,28 @@
  * ║   5. LEFT (Turn Left) : 3 Seconds                               ║
  * ║   6. PAUSE            : 1.5 Seconds                             ║
  * ║   7. RIGHT (Turn Right: 3 Seconds                               ║
- * ║   8. PAUSE            : 2 Seconds -> Repeats automatically      ║
+ * ║   8. PAUSE            : 1.5 Seconds                             ║
+ * ║   9. LEFT CHANNEL ONLY: 3 Seconds   <- isolates ENA/IN1/IN2     ║
+ * ║  10. PAUSE            : 1.5 Seconds                             ║
+ * ║  11. RIGHT CH. ONLY   : 3 Seconds   <- isolates ENB/IN3/IN4     ║
+ * ║  12. PAUSE            : 2 Seconds -> Repeats automatically      ║
  * ║                                                                  ║
  * ║  SERIAL COMMANDS (115200 baud):                                  ║
  * ║   'f' -> Forward 3s                                             ║
- * ║   'b' -> Backward 3s                                            ║
- * ║   'l' -> Left Turn 3s                                           ║
- * ║   'r' -> Right Turn 3s                                          ║
- * ║   's' -> STOP immediately                                       ║
- * ║   'a' -> Resume Automatic 4-Direction Cycle                     ║
+ * ║   'b' -> Backward 3s                                             ║
+ * ║   'l' -> Left Turn 3s                                            ║
+ * ║   'r' -> Right Turn 3s                                           ║
+ * ║   '1' -> LEFT channel ONLY 3s  (2 wheels, ENA=25/IN1=26/IN2=27)  ║
+ * ║   '2' -> RIGHT channel ONLY 3s (2 wheels, ENB=33/IN3=32/IN4=14)  ║
+ * ║   's' -> STOP immediately                                        ║
+ * ║   'a' -> Resume Automatic Cycle (incl. channel-isolation steps)  ║
+ * ║                                                                  ║
+ * ║  USE '1' / '2' WHEN ONE SIDE DOESN'T SPIN:                      ║
+ * ║   run this sketch with NO laptop attached. If '1' leaves the     ║
+ * ║   left wheels dead too, the fault is L298N channel A / ENA       ║
+ * ║   jumper / IN1-IN2 wires / 12V feed — not the main firmware.     ║
  * ╚══════════════════════════════════════════════════════════════════╝
  */
-
-#include <Arduino.h>
 
 // ── Pin Definitions ──────────────────────────────────────────────────
 #define PIN_ENA   25  // Left Motor Speed (PWM)
@@ -117,6 +126,27 @@ void motorsTurnRight(uint8_t spd) {
   pwmWrite(PIN_ENB, PWM_CH_R, spd);
 }
 
+// ── Single-channel isolation (dead-side diagnosis) ─────────────────────
+// Drives ONLY one H-bridge channel so a side that never moves can be
+// traced to the driver/wiring instead of the main firmware.
+void motorsLeftOnly(uint8_t spd) {
+  digitalWrite(PIN_IN1, HIGH);   // left forward
+  digitalWrite(PIN_IN2, LOW);
+  digitalWrite(PIN_IN3, LOW);    // right idle (both IN low = brake)
+  digitalWrite(PIN_IN4, LOW);
+  pwmWrite(PIN_ENA, PWM_CH_L, spd);
+  pwmWrite(PIN_ENB, PWM_CH_R, 0);
+}
+
+void motorsRightOnly(uint8_t spd) {
+  digitalWrite(PIN_IN1, LOW);    // left idle
+  digitalWrite(PIN_IN2, LOW);
+  digitalWrite(PIN_IN3, HIGH);   // right forward
+  digitalWrite(PIN_IN4, LOW);
+  pwmWrite(PIN_ENA, PWM_CH_L, 0);
+  pwmWrite(PIN_ENB, PWM_CH_R, spd);
+}
+
 // ── Timed Movement with Live Second-by-Second Countdown ──────────────
 void executeTimedAction(const char* name, void (*motorFunc)(uint8_t), int durationSec) {
   Serial.println();
@@ -144,8 +174,8 @@ void executePause(float pauseSec) {
 // ── Full 4-Direction Test Cycle ──────────────────────────────────────
 void runFullCycle() {
   Serial.println(F("\n##################################################"));
-  Serial.println(F("  STARTING FULL 4-DIRECTION MOTOR TEST CYCLE"));
-  Serial.println(F("  1. FRONT (3s) -> 2. BACK (3s) -> 3. LEFT (3s) -> 4. RIGHT (3s)"));
+  Serial.println(F("  STARTING FULL MOTOR TEST CYCLE"));
+  Serial.println(F("  FRONT -> BACK -> LEFT -> RIGHT -> LEFT-ONLY -> RIGHT-ONLY"));
   Serial.println(F("##################################################"));
 
   // 1. FRONT (3 seconds)
@@ -162,9 +192,19 @@ void runFullCycle() {
 
   // 4. RIGHT (3 seconds)
   executeTimedAction("4. RIGHT TURN", motorsTurnRight, 3);
+  executePause(1.5);
+
+  // 5. LEFT CHANNEL ONLY (3 seconds) — isolates ENA/IN1/IN2
+  executeTimedAction("5. LEFT CHANNEL ONLY", motorsLeftOnly, 3);
+  executePause(1.5);
+
+  // 6. RIGHT CHANNEL ONLY (3 seconds) — isolates ENB/IN3/IN4
+  executeTimedAction("6. RIGHT CHANNEL ONLY", motorsRightOnly, 3);
   executePause(2.0);
 
-  Serial.println(F("\n[CYCLE FINISHED] All 4 directions tested successfully!"));
+  Serial.println(F("\n[CYCLE FINISHED] All 4 directions + both channels tested!"));
+  Serial.println(F("If the LEFT wheels never move in step 5 -> L298N channel A /"));
+  Serial.println(F("ENA jumper / IN1-IN2 / 12V feed, NOT the main firmware."));
   Serial.println(F("Next cycle starts in 3 seconds (or type 's' to stop)...\n"));
   delay(3000);
 }
@@ -183,7 +223,7 @@ void setup() {
   Serial.printf( "  Left Motors  : ENA=%d, IN1=%d, IN2=%d\n", PIN_ENA, PIN_IN1, PIN_IN2);
   Serial.printf( "  Right Motors : ENB=%d, IN3=%d, IN4=%d\n", PIN_ENB, PIN_IN3, PIN_IN4);
   Serial.println(F("Safety Warning: Robot ko stand/box par rakhein taake wheels hawa mein hon!"));
-  Serial.println(F("Commands: 'f'=Forward, 'b'=Backward, 'l'=Left, 'r'=Right, 's'=Stop, 'a'=Auto Cycle\n"));
+  Serial.println(F("Commands: 'f'=Fwd, 'b'=Back, 'l'=Left, 'r'=Right, '1'=Left channel only,\n          '2'=Right channel only, 's'=Stop, 'a'=Auto Cycle\n"));
 
   // Configure Direction GPIOs
   pinMode(PIN_IN1, OUTPUT);
@@ -229,6 +269,14 @@ void loop() {
     } else if (cmd == 'r' || cmd == 'R') {
       autoCycle = false;
       executeTimedAction("MANUAL RIGHT TURN", motorsTurnRight, 3);
+      return;
+    } else if (cmd == '1') {
+      autoCycle = false;
+      executeTimedAction("MANUAL LEFT CHANNEL ONLY (ENA/IN1/IN2)", motorsLeftOnly, 3);
+      return;
+    } else if (cmd == '2') {
+      autoCycle = false;
+      executeTimedAction("MANUAL RIGHT CHANNEL ONLY (ENB/IN3/IN4)", motorsRightOnly, 3);
       return;
     }
   }

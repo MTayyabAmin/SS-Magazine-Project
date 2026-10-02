@@ -173,7 +173,12 @@ class UdpMotorClient:
 
         Args:
             v: Linear velocity in m/s (positive=forward, negative=reverse).
-            omega: Angular velocity in rad/s (positive=CCW/left).
+            omega: Angular velocity in rad/s (positive=CCW/left). Firmware
+                treats ANY non-zero omega as a pivot turn: it stops one
+                wheel and runs the other at PIVOT_TURN_V_MS (1.0 m/s =
+                MAX_PWM, config.h), so omega selects only the turn
+                DIRECTION and every turn is at full speed (yaw ≈ 5 rad/s).
+                omega == 0 drives both sides at v (straight).
             allow_creep: True to permit low-speed creep (ESP32 skips its
                 wall-stop while creeping — used in CREEP/SCAN states).
 

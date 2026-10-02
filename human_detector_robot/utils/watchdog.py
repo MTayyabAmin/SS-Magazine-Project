@@ -50,7 +50,9 @@ class StuckWatchdog:
             as "not moved" (default 0.03 = 3cm).
         state_timeout_s: Seconds in one FSM state before force-reset to
             CRUISE (default 8.0).
-        recovery_omega: Turn speed (rad/s) of the recovery spin.
+        recovery_omega: Turn command (rad/s) of the recovery spin — sign
+            picks the direction only; with firmware PIVOT_TURNS the actual
+            pivot runs at PIVOT_TURN_V_MS = full speed (one side stopped).
         recovery_turn_s: Duration (seconds) of the recovery spin.
         _anchor_x/_anchor_y/_anchor_t: Pose anchor point and its timestamp.
         _recovering_until: If now < this, a recovery turn is still running.
@@ -71,7 +73,8 @@ class StuckWatchdog:
             pose_stuck_timeout_s: Stuck duration before pose recovery.
             pose_stuck_radius_m: Movement radius that counts as "moving".
             state_timeout_s: FSM state duration before force-reset.
-            recovery_omega: Recovery turn angular speed (rad/s).
+            recovery_omega: Recovery turn command (rad/s) — direction only,
+                the firmware pivot sets the actual rate (see PIVOT_TURNS).
             recovery_turn_s: Recovery turn duration (seconds).
         """
         self.pose_stuck_timeout_s = pose_stuck_timeout_s

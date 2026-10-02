@@ -47,6 +47,13 @@ int           distRightCm  = -1;
 int           senseRssi    = 0;
 unsigned long lastUsMs       = 0;
 
+// Signed PWM duty last written to each H-bridge channel (set by setMotor(),
+// reported on the 1 Hz serial line and in the pwm_l/pwm_r telemetry keys).
+// Debug aid: if both show 200 but only one side turns, the fault is wiring/
+// L298N, not firmware.
+int           pwmLeftApplied  = 0;
+int           pwmRightApplied = 0;
+
 static const uint8_t MPU_ADDR    = 0x68;
 static const uint8_t REG_PWR     = 0x6B;
 static const uint8_t REG_ACCEL_X = 0x3B;
@@ -187,7 +194,9 @@ static inline void pwmWrite(uint8_t pin, uint8_t channel, uint32_t val) {
 #endif
 }
 
-static void setMotor(uint8_t pinEn, uint8_t channel, uint8_t in1, uint8_t in2, int speed) {
+// Writes one L298N channel and RETURNS the signed duty actually written
+// (after constrain) so drive() can report it as pwm_l/pwm_r telemetry.
+static int setMotor(uint8_t pinEn, uint8_t channel, uint8_t in1, uint8_t in2, int speed) {
   speed = constrain(speed, -MAX_PWM, MAX_PWM);
   if (speed > 0) {
     digitalWrite(in1, HIGH); digitalWrite(in2, LOW);
@@ -199,6 +208,7 @@ static void setMotor(uint8_t pinEn, uint8_t channel, uint8_t in1, uint8_t in2, i
     digitalWrite(in1, LOW);  digitalWrite(in2, LOW);
     pwmWrite(pinEn, channel, 0);
   }
+  return speed;
 }
 
 static void applyDeadzone(int &speed) {
@@ -209,21 +219,61 @@ static void applyDeadzone(int &speed) {
   speed = sign * mag;
 }
 
+// Mixes commanded linear + angular velocity into per-side PWM duty.
+//
+// MAX_LINEAR_V_MS is the full-scale speed: v == MAX_LINEAR_V_MS saturates a
+// side to MAX_PWM. It used to be 0.5f, but the laptop speed-floor policy
+// (project.yaml: every non-zero linear speed >= 0.8 m/s) made that fatal —
+// 0.8/0.5*200 = 320, so BOTH sides clamped to MAX_PWM and omega could no
+// longer differentiate them: every moving command drove straight, only
+// v=0 in-place turns could still steer.
+// At 1.0f, v=0.8 gives duty 160/200 and omega keeps its share of the mixer.
+//
+// TURNS (PIVOT_TURNS, config.h): any omega != 0 stops ONE side and runs the
+// other at PIVOT_TURN_V_MS (1.0f = full scale = MAX_PWM) instead of the
+// classic differential — a turn is always "0 on one side, max speed on the
+// other", so it can never stall in the deadzone. v and omega only choose the
+// direction:
+//     omega > 0 (CCW), v >= 0 : left 0, right +side
+//     omega > 0 (CCW), v <  0 : left -side, right 0
+//     omega < 0 (CW),  v >= 0 : left +side, right 0
+//     omega < 0 (CW),  v <  0 : left 0, right -side
+// v == 0 (scan / recovery rotations) defaults to the forward pair, so a
+// pivot always translates along an arc of radius WHEEL_BASE_M/2 — the
+// laptop keeps commanding v=0 there, so dead-reckoning will NOT integrate
+// that drift (see tentative_map.update_pose).
 static void drive(float v, float omega) {
-  const float MAX_LINEAR_V_MS = 0.5f;
+  const float MAX_LINEAR_V_MS = 1.0f;
   float vLeft  = v - omega * (WHEEL_BASE_M / 2.0f);
   float vRight = v + omega * (WHEEL_BASE_M / 2.0f);
+
+#if PIVOT_TURNS
+  if (omega != 0.0f) {
+    // Full-power pivot: moving side pinned to PIVOT_TURN_V_MS regardless of
+    // |v| / |omega| (PIVOT_TURN_V_MS == MAX_LINEAR_V_MS → duty MAX_PWM).
+    const float side = PIVOT_TURN_V_MS;
+    bool move_forward = (v >= 0.0f);
+    if (omega > 0.0f) {            // CCW / left turn
+      vLeft  = move_forward ? 0.0f : -side;
+      vRight = move_forward ? side  : 0.0f;
+    } else {                        // CW / right turn
+      vLeft  = move_forward ? side  : 0.0f;
+      vRight = move_forward ? 0.0f  : -side;
+    }
+  }
+#endif
+
   int pwmLeft  = (int)(vLeft  / MAX_LINEAR_V_MS * (float)MAX_PWM);
   int pwmRight = (int)(vRight / MAX_LINEAR_V_MS * (float)MAX_PWM);
   applyDeadzone(pwmLeft);
   applyDeadzone(pwmRight);
-  setMotor(PIN_ENA, PWM_CHANNEL_L, PIN_IN1, PIN_IN2, pwmLeft);
-  setMotor(PIN_ENB, PWM_CHANNEL_R, PIN_IN3, PIN_IN4, pwmRight);
+  pwmLeftApplied  = setMotor(PIN_ENA, PWM_CHANNEL_L, PIN_IN1, PIN_IN2, pwmLeft);
+  pwmRightApplied = setMotor(PIN_ENB, PWM_CHANNEL_R, PIN_IN3, PIN_IN4, pwmRight);
 }
 
 static void stopMotors() {
-  setMotor(PIN_ENA, PWM_CHANNEL_L, PIN_IN1, PIN_IN2, 0);
-  setMotor(PIN_ENB, PWM_CHANNEL_R, PIN_IN3, PIN_IN4, 0);
+  pwmLeftApplied  = setMotor(PIN_ENA, PWM_CHANNEL_L, PIN_IN1, PIN_IN2, 0);
+  pwmRightApplied = setMotor(PIN_ENB, PWM_CHANNEL_R, PIN_IN3, PIN_IN4, 0);
 }
 
 // ── WiFi sensing RSSI (Passive human RF attenuation sensing) ──────────────────
@@ -287,6 +337,10 @@ static void sendTelemetry(IPAddress remoteIP, uint16_t remotePort) {
   doc["dist_right_cm"]= distRightCm;
   doc["sense_rssi"]   = senseRssi;
   doc["wall_near"]    = (distFrontCm > 0 && distFrontCm <= US_STOP_CM);
+  // Signed duty actually written to each H-bridge channel — lets the laptop
+  // compare "what we commanded" against "what the driver got".
+  doc["pwm_l"]        = pwmLeftApplied;
+  doc["pwm_r"]        = pwmRightApplied;
 
   udpTelem.beginPacket(remoteIP, remotePort);
   serializeJson(doc, udpTelem);
@@ -374,6 +428,11 @@ void setup() {
 
   lastCmdMs = millis();
   lastImuUs = micros();
+#if DEBUG_STRAIGHT
+  // Loud banner: wheels start spinning the moment power is applied.
+  Serial.println("[DEBUG_STRAIGHT] ON — driving ALL four wheels straight at "
+                 "DEBUG_STRAIGHT_V, ignoring UDP/wall/timeout. Type 's' to stop.");
+#endif
   Serial.println("[READY] Waiting for laptop controller...");
 }
 
@@ -384,6 +443,26 @@ void loop() {
   pollCommands();
 
   unsigned long now = millis();
+
+#if DEBUG_STRAIGHT
+  // ── DEBUG: force straight drive — ALL four wheels, no conditions ──────────
+  // Bypasses UDP cmd, heading PID, CMD_TIMEOUT, tooClose, wallNear and the
+  // allow_creep gate (see config.h). omega = 0 → vLeft == vRight → both
+  // H-bridge channels get identical duty.
+  // 's' in the serial monitor = emergency stop (stays off until reset).
+  static bool debugStopped = false;
+  if (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == 's' || c == 'S') {
+      debugStopped = true;
+      stopMotors();
+      Serial.println("[DEBUG_STRAIGHT] 's' received — MOTORS STOPPED (reset to resume).");
+    }
+  }
+  if (!debugStopped) {
+    drive(DEBUG_STRAIGHT_V, 0.0f);
+  }
+#else
   bool wallNear = (distFrontCm > 0 && distFrontCm <= US_STOP_CM);
   bool tooClose = (distFrontCm > 0 && distFrontCm < US_MIN_CM);
 
@@ -409,6 +488,7 @@ void loop() {
     }
     drive(v, omega);
   }
+#endif
 
   static unsigned long lastTelemMs = 0;
   if ((now - lastTelemMs) >= TELEMETRY_INTERVAL_MS) {
@@ -425,11 +505,22 @@ void loop() {
   static unsigned long lastSerialMs = 0;
   if ((now - lastSerialMs) >= 1000) {
     lastSerialMs = now;
-    const char* mState = (cmdV > 0.02) ? "FWD" : ((cmdV < -0.02) ? "REV" : ((abs(cmdOmega) > 0.1) ? "TURN" : "STOP"));
+    // mState is derived from the APPLIED duty (not from cmdV/cmdOmega) so it
+    // reflects what the L298N channels actually received — in DEBUG_STRAIGHT
+    // mode cmdV/cmdOmega still hold the last laptop packet and would lie.
+    int dutyL = abs(pwmLeftApplied), dutyR = abs(pwmRightApplied);
+    const char* mState;
+    if (dutyL == 0 && dutyR == 0)      mState = "STOP";
+    else if (pwmLeftApplied > 0 && pwmRightApplied > 0) mState = "FWD";
+    else if (pwmLeftApplied < 0 && pwmRightApplied < 0) mState = "REV";
+    else                               mState = "TURN";
     // Sensor roles: FRONT + RIGHT (config.h FIX) — left slot is reserved and
     // would always print -1, so it is not shown.
-    Serial.printf("[ROBOT #%d] Motors: %-4s (v=%.2f, w=%.2f) | Sonar Front: %3dcm, Right: %3dcm | MPU Yaw: %+5.1f deg | Bias: %+5.2fdps%s\n",
-                  ROBOT_ID, mState, cmdV, cmdOmega, distFrontCm, distRightCm,
+    // "PWM L/R" is the asymmetry detector: both lines must be equal for a
+    // straight drive; if L=200 but the left wheels don't spin, it's wiring.
+    Serial.printf("[ROBOT #%d] Motors: %-4s (v=%.2f, w=%.2f) | PWM L=%3d R=%3d | Sonar Front: %3dcm, Right: %3dcm | MPU Yaw: %+5.1f deg | Bias: %+5.2fdps%s\n",
+                  ROBOT_ID, mState, cmdV, cmdOmega, pwmLeftApplied, pwmRightApplied,
+                  distFrontCm, distRightCm,
                   yawRad * RAD_TO_DEG, gyroBiasDps, biasReady ? "" : " (boot)");
   }
 

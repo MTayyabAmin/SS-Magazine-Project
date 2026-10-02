@@ -124,6 +124,10 @@ class RobotContext:
             control loop (bugfix comment in-class).
         last_cmd_source/last_cmd_class/last_cmd_log: Bookkeeping for the
             [CMD] motion-attribution log written each control loop.
+        pwm_l/pwm_r: Signed PWM duty the firmware applied to the left/right
+            H-bridge channel (0 when the firmware build lacks those keys).
+            Straight drive must show equal values — unequal means wiring,
+            not firmware (see human_detector_robot.ino sendTelemetry()).
         _wifi_hint: TASK-10 raw WiFi hint before brake-worthiness gating.
     """
 
@@ -192,6 +196,9 @@ class RobotContext:
     last_cmd_source: str = "FSM"
     last_cmd_class: str = "STOP"
     last_cmd_log: float = 0.0
+    # Per-side duty echo from the firmware (debugging a dead channel).
+    pwm_l: int = 0
+    pwm_r: int = 0
     # TASK-10: latest raw wifi hint (before brake-worthiness gating)
     _wifi_hint: str | None = None
 
@@ -519,13 +526,14 @@ def main() -> None:
             r.udp = UdpMotorClient(host=r.udp_host, port=r.udp_port, telemetry_port=r.telemetry_port)
             r.limiter = RateLimiter(robot_cfg.get("command_rate_hz", 20))
 
+        # Fallbacks match project.yaml: all linear speeds >= 0.8 m/s floor.
         r.fsm = AutonomousFSM(
-            v_cruise=ctrl_cfg.get("v_cruise", 0.22),
-            v_creep=ctrl_cfg.get("v_creep", 0.06),
+            v_cruise=ctrl_cfg.get("v_cruise", 0.8),
+            v_creep=ctrl_cfg.get("v_creep", 0.8),
             omega_scan=ctrl_cfg.get("omega_scan", 0.35),
             wall_stop_cm=robot_cfg.get("wall_stop_cm", 100),
-            scan_standoff_min_cm=ctrl_cfg.get("scan_standoff_min_cm", 30),
-            scan_standoff_max_cm=ctrl_cfg.get("scan_standoff_max_cm", 40),
+            scan_standoff_min_cm=ctrl_cfg.get("scan_standoff_min_cm", 60),
+            scan_standoff_max_cm=ctrl_cfg.get("scan_standoff_max_cm", 90),
             open_path_cm=ctrl_cfg.get("open_path_cm", 120),
             scan_step_deg=ctrl_cfg.get("scan_step_deg", 15),
             scan_side_deg=ctrl_cfg.get("scan_side_deg", 90),
@@ -585,6 +593,9 @@ def main() -> None:
                     r.dist_left_cm = l_cm
                     r.dist_right_cm = r_cm
                     r.wall_near = bool(telem.get("wall_near", False))
+                    # Per-side PWM duty (debug keys; 0 on older firmware).
+                    r.pwm_l = int(telem.get("pwm_l", 0))
+                    r.pwm_r = int(telem.get("pwm_r", 0))
 
                     if f_cm > 0:
                         r.last_front_sonar_time = now

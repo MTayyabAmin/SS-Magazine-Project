@@ -5,7 +5,8 @@ NO SERVO — poora robot apni jagah rotate hota hai (v=0, omega≠0).
 Left/right dono directions scan hoti hain; jo rasta zyada khula ho wahan jata hai.
 
 Corner / T-junction flow:
-  1. Stop @ 100cm → creep to 30-40cm standoff
+  1. Stop @ 100cm → creep to the 60-90cm standoff band (scan/turn starts
+     farther out than the old 30-40cm band so obstacles are handled earlier)
   2. WiFi human scan
   3. Robot rotate LEFT 90°  (sonar samples har 15°)
   4. Robot rotate RIGHT 90° (wapas center se dusri taraf)
@@ -20,8 +21,8 @@ TASK-07 (D4 -- FSM: Path Follow + Junctions) changes vs the original:
   - SCAN_ROTATE completes the FULL +/-90 deg sweep -- no early-exit on
     the first opening found (which could miss a wider opening a few
     degrees further round).
-  - CREEP_TO_SCAN aborts after ~3s if the 30-40cm standoff isn't reached
-    (avoids infinite creep / stuck-at-50cm spinning).
+  - CREEP_TO_SCAN aborts after ~3s if the standoff band (60-90cm) isn't
+    reached (avoids infinite creep / stuck-at-50cm spinning).
   - TURN_TO_PATH alignment tolerance tightened from 8deg to 4deg.
 
 TASK-11: SWARM_YIELD now times out after yield_timeout_s and reports
@@ -75,9 +76,12 @@ class AutonomousFSM:
 
     Attributes:
         state: Current RobotState.
-        v_cruise: Forward velocity during cruising (m/s).
-        v_creep: Forward velocity during close-approach creeping (m/s).
-        omega_scan: Angular velocity during scan rotation (rad/s).
+        v_cruise: Forward velocity during cruising (m/s) — project floor 0.8.
+        v_creep: Forward velocity during close-approach creeping (m/s) and
+            also the reverse speed when too close — floor 0.8 as well.
+        omega_scan: Angular velocity during scan rotation (rad/s) — with
+            firmware PIVOT_TURNS its magnitude is ignored (it only picks
+            the turn direction; the pivot runs at PIVOT_TURN_V_MS = full).
         wall_stop_cm: Front sonar distance that triggers a wall stop (cm).
         scan_standoff_min/max_cm: Acceptable standoff band for scanning (cm).
         open_path_cm: Sonar distance to consider a path "open" (cm).
@@ -108,12 +112,16 @@ class AutonomousFSM:
 
     def __init__(
         self,
-        v_cruise: float = 0.22,
-        v_creep: float = 0.06,
+        # SPEED POLICY: every non-zero linear speed in this project is >= 0.8
+        # m/s (0.22 / 0.06 were the old creep-crawl floors). The firmware
+        # matches it: drive() scales v with MAX_LINEAR_V_MS = 1.0f, so 0.8
+        # maps to PWM 160/200 and omega can still differentiate the sides.
+        v_cruise: float = 0.8,
+        v_creep: float = 0.8,
         omega_scan: float = 0.35,
         wall_stop_cm: int = 100,
-        scan_standoff_min_cm: int = 30,
-        scan_standoff_max_cm: int = 40,
+        scan_standoff_min_cm: int = 60,
+        scan_standoff_max_cm: int = 90,
         open_path_cm: int = 120,
         scan_step_deg: float = 15.0,
         scan_side_deg: float = 90.0,
@@ -132,9 +140,11 @@ class AutonomousFSM:
         from project.yaml `control` / `robot` sections by the caller).
 
         Args:
-            v_cruise: Forward speed (m/s) in CRUISE.
-            v_creep: Forward speed (m/s) in CREEP_TO_SCAN.
-            omega_scan: Rotational speed (rad/s) during the scan sweep.
+            v_cruise: Forward speed (m/s) in CRUISE — must be >= 0.8.
+            v_creep: Forward speed (m/s) in CREEP_TO_SCAN, and the magnitude
+                of the "too close" reverse — must be >= 0.8.
+            omega_scan: Rotational command (rad/s) during the scan sweep —
+                direction only; the firmware pivot sets the real turn rate.
             wall_stop_cm: Front sonar distance (cm) that triggers STOP_AT_WALL.
             scan_standoff_min_cm: Minimum standoff to start the WiFi scan.
             scan_standoff_max_cm: Maximum standoff; creep forward if beyond this.
@@ -352,7 +362,12 @@ class AutonomousFSM:
 
         Returns (v, omega, message):
           - v: Linear velocity in m/s (positive=forward, negative=reverse).
-          - omega: Angular velocity in rad/s (positive=CCW/left).
+          - omega: Angular velocity in rad/s (positive=CCW/left). The
+            firmware turns any non-zero omega into a one-side-stopped
+            full-speed pivot (see PIVOT_TURNS in esp32 config.h): omega
+            only picks the turn direction, the moving wheel runs at
+            PIVOT_TURN_V_MS (1.0 m/s = MAX_PWM), so the physical turn
+            rate is ~5 rad/s regardless of how small omega is.
           - message: Status string for logging/HUD, or None.
 
         `target_heading_deg` (TASK-07, optional): if the A* planner (D3)
@@ -382,7 +397,7 @@ class AutonomousFSM:
              v_cruise with corridor centering omega (left-right sonar balance)
              plus A* heading steering when target_heading_deg is given.
           4. STOP_AT_WALL: single tick, immediately go to CREEP_TO_SCAN.
-          5. CREEP_TO_SCAN: creep until standoff band [30-40cm]; reverse if too
+          5. CREEP_TO_SCAN: creep until standoff band [60-90cm]; reverse if too
              close; TASK-07 aborts to WIFI_SCAN after creep_timeout_s.
           6. WIFI_SCAN: after 0.8s settle, compare BOTH side sonars — turn
              toward the more open side immediately, else begin SCAN_ROTATE.
@@ -469,12 +484,16 @@ class AutonomousFSM:
 
         if self.state == RobotState.STOP_AT_WALL:
             self._enter(RobotState.CREEP_TO_SCAN, now)
-            return 0.0, 0.0, "[SCAN] Creep to 30-40cm (robot will rotate in place next)..."
+            return 0.0, 0.0, (
+                f"[SCAN] Creep to {self.scan_standoff_min}-{self.scan_standoff_max}cm "
+                "(robot will rotate in place next)..."
+            )
 
         if self.state == RobotState.CREEP_TO_SCAN:
-            # TASK-07: abort creep if the 30-40cm standoff isn't reached
-            # within ~3s -- avoids the old "stuck at ~50cm, spinning
-            # wheels forever" bug. We just go scan from wherever we are.
+            # TASK-07: abort creep if the standoff band (60-90cm by default)
+            # isn't reached within ~3s -- avoids the old "stuck at ~50cm,
+            # spinning wheels forever" bug. We just go scan from wherever we
+            # are.
             if self._elapsed(now) >= self.creep_timeout_s:
                 self._enter(RobotState.WIFI_SCAN, now)
                 return 0.0, 0.0, f"[SCAN] Creep timeout ({self.creep_timeout_s:.0f}s) — scanning from {dist_cm}cm"
@@ -485,7 +504,9 @@ class AutonomousFSM:
                 return 0.0, 0.0, f"[SCAN] Standoff {dist_cm}cm OK — WiFi scan..."
             if dist_cm > self.scan_standoff_max:
                 return self.v_creep, 0.0, None  # still too far — creep forward
-            return -self.v_creep * 0.5, 0.0, f"[SCAN] Too close ({dist_cm}cm) — reverse"
+            # Reverse uses the full creep speed — the >= 0.8 m/s floor applies
+            # to reverse too (was -v_creep * 0.5, i.e. below the floor).
+            return -self.v_creep, 0.0, f"[SCAN] Too close ({dist_cm}cm) — reverse"
 
         if self.state == RobotState.WIFI_SCAN:
             if self._elapsed(now) >= 0.8:

@@ -23,12 +23,14 @@ Single-robot control loop (run once per robot with --robot 1|2):
         confirmation or 3+ consecutive drops plus a wall ahead (TASK-10).
      e. Update occupancy grid + A* frontier plan → target heading for
         CRUISE (TASK-04/05/06); fall back to FSM scan if no path.
-     f. FSM step → (v, omega); failsafe and StuckWatchdog may override
-        (TASK-08). The chosen command plus its SOURCE (DEBUG / FSM /
-        FAILSAFE / WATCHDOG) is then written to the [CMD] attribution log
-        so a stray wheel movement can be traced after the fact. Finally the
-        DEBUG_FORCE_FORWARD flag at the top of this file, when set, forces a
-        straight-line drive and overrides everything above.
+      f. FSM step → (v, omega); failsafe and StuckWatchdog may override
+         (TASK-08). The chosen command plus its SOURCE (DEBUG / FSM /
+         FAILSAFE / WATCHDOG) is then written to the [CMD] attribution log
+         so a stray wheel movement can be traced after the fact. Finally the
+         DEBUG_FORCE_FORWARD flag at the top of this file, when set, forces a
+         straight-line drive and overrides everything above, and a 1 Hz
+         [DEBUG] line echoes what the firmware says it received plus the
+         PWM duty applied to each H-bridge channel (pwm_l / pwm_r).
      g. Update pose/map/walls (dead-reckoning with failsafe awareness,
         TASK-03); register unique humans (TASK-09); autosave map.
      h. Send rate-limited motor command; render HUD (TASK-12) and
@@ -51,14 +53,22 @@ from __future__ import annotations
 #   * the outgoing command is forced to (DEBUG_FORWARD_V, 0.0) every tick,
 #   * allow_creep is forced True, so the ESP32's 100cm wall-near stop
 #     (US_STOP_CM) is bypassed as well,
-#   * the [CMD] attribution log records the source as "DEBUG".
+#   * the [CMD] attribution log records the source as "DEBUG",
+#   * a 1 Hz [DEBUG] line prints  cmd v/w | telem v/w | pwm L/R  so the
+#     commanded value can be compared with what the ESP32 reports it drove.
+#     Equal pwm L/R is required for a straight drive; "SIDES DIFFER" means
+#     the fault is downstream of the firmware (L298N / wiring / power).
 # It does NOT bypass the ESP32's <25cm hard stop (US_MIN_CM) — that one is
-# firmware-side safety and is intentionally left alone.
+# firmware-side safety and is intentionally left alone. (Set the firmware's
+# DEBUG_STRAIGHT in esp32/human_detector_robot/config.h if you want a
+# laptop-independent straight drive that bypasses every firmware condition
+# too; keep DEBUG_FORWARD_V and DEBUG_STRAIGHT_V at the same value.)
+# Older firmware without pwm_l/pwm_r reports 0/0 for those two fields.
 #
 # WARNING: set it back to False before any normal/autonomous run. It is a
 # one-line edit on purpose — no CLI switch and no env var — so it cannot be
 # enabled by accident or by a config typo.
-DEBUG_FORCE_FORWARD: bool = True
+DEBUG_FORCE_FORWARD: bool = False
 DEBUG_FORWARD_V: float = 1      # m/s used while DEBUG_FORCE_FORWARD is on
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -255,13 +265,14 @@ def main() -> None:
         )
         limiter = RateLimiter(robot_cfg.get("command_rate_hz", 20))
 
+    # Fallbacks match project.yaml: all linear speeds >= 0.8 m/s (speed floor).
     fsm = AutonomousFSM(
-        v_cruise=ctrl_cfg.get("v_cruise", 0.22),
-        v_creep=ctrl_cfg.get("v_creep", 0.06),
+        v_cruise=ctrl_cfg.get("v_cruise", 0.8),
+        v_creep=ctrl_cfg.get("v_creep", 0.8),
         omega_scan=ctrl_cfg.get("omega_scan", 0.35),
         wall_stop_cm=robot_cfg.get("wall_stop_cm", 100),
-        scan_standoff_min_cm=ctrl_cfg.get("scan_standoff_min_cm", 30),
-        scan_standoff_max_cm=ctrl_cfg.get("scan_standoff_max_cm", 40),
+        scan_standoff_min_cm=ctrl_cfg.get("scan_standoff_min_cm", 60),
+        scan_standoff_max_cm=ctrl_cfg.get("scan_standoff_max_cm", 90),
         open_path_cm=ctrl_cfg.get("open_path_cm", 120),
         scan_step_deg=ctrl_cfg.get("scan_step_deg", 15),
         scan_side_deg=ctrl_cfg.get("scan_side_deg", 90),
@@ -326,6 +337,8 @@ def main() -> None:
     last_cmd_source = "FSM"
     last_cmd_class = "STOP"
     last_cmd_log = 0.0
+    # 1 Hz DEBUG_FORCE_FORWARD proof line (commanded vs echoed vs duty).
+    last_debug_log = 0.0
     frame_idx = 0
     last_detections: list = []
     failsafe_active = False
@@ -363,6 +376,14 @@ def main() -> None:
             wall_near = bool(telem.get("wall_near", False)) if telem else False
             sense_rssi = int(telem.get("sense_rssi", 0)) if telem else 0
             raw_yaw = float(telem.get("yaw", 0.0)) if telem else 0.0
+            # Firmware-side debug echo: what the ESP32 says it received plus
+            # the signed PWM duty it applied to each H-bridge channel. Older
+            # firmware without pwm_l/pwm_r reports 0/0 (see human_detector_
+            # robot.ino sendTelemetry()).
+            telem_v = float(telem.get("v", 0.0)) if telem else 0.0
+            telem_omega = float(telem.get("omega", 0.0)) if telem else 0.0
+            telem_pwm_l = int(telem.get("pwm_l", 0)) if telem else 0
+            telem_pwm_r = int(telem.get("pwm_r", 0)) if telem else 0
 
             # TASK-01/02: clean sonar + yaw BEFORE the FSM/mapping ever
             # sees them -- invalid -1s, spikes, and yaw teleports never
@@ -489,6 +510,25 @@ def main() -> None:
                 )
                 last_cmd_source, last_cmd_class = cmd_source, cmd_class
                 last_cmd_log = now
+
+            # 1 Hz proof line, only while DEBUG_FORCE_FORWARD is on:
+            # humne kya bheja (cmd) vs ESP32 ne kya receive kiya (telem) vs
+            # dono H-bridge channels ko mili duty (pwm L/R). Seedhe drive
+            # mein pwm_l aur pwm_r barabar hone chahiye — agar "SIDES DIFFER"
+            # dikhe toh masla firmware mein nahi (WIRING_GUIDE dekhein).
+            if DEBUG_FORCE_FORWARD and now - last_debug_log >= 1.0:
+                last_debug_log = now
+                if telem is None:
+                    dbg_note = " (no telemetry yet)"
+                elif telem_pwm_l != telem_pwm_r:
+                    dbg_note = "  <-- SIDES DIFFER"
+                else:
+                    dbg_note = ""
+                log.info(
+                    "[DEBUG] cmd v=%+.3f w=%+.3f | telem v=%+.3f w=%+.3f | pwm L=%d R=%d%s",
+                    v, omega, telem_v, telem_omega,
+                    telem_pwm_l, telem_pwm_r, dbg_note,
+                )
 
             last_v, last_omega = v, omega
 
