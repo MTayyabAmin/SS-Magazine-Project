@@ -1,0 +1,112 @@
+===========================================================================================
+  ARK-5 ROBOT MOVEMENT & DIRECTION LOG (MPU6050 + ULTRASONIC DEAD-RECKONING)
+  Robot ID              : #1
+  Total Distance Moved  :  1076.8 cm  (10.77 meters)
+  Total Turns Executed  : 0 turns  (Cumulative rotation: 0.0°)
+  Current Heading (MPU) :  +360.0°
+  Current Position      : X =  425.5 cm,  Y =   -0.1 cm
+  Humans Located        : 2
+  Last Log Time         : 2026-10-12 16:51:16
+===========================================================================================
+[TIME]   | ACTION         | DELTA        | DETAILS                          | POSE (X, Y, YAW)          | SONAR
+---------|----------------|--------------|----------------------------------|---------------------------|-------------------
+[16:28:49] MOVE_FORWARD   | +20.0 cm     | Advanced 20.0 cm (State: CRUISE) | (  20.0cm,   -0.0cm, +360.0°) | F: -1cm, L: -1cm
+[16:28:49] MOVE_FORWARD   | +20.0 cm     | Advanced 20.0 cm (State: CRUISE) | (  40.0cm,   -0.0cm, +360.0°) | F: -1cm, L: -1cm
+[16:28:49] STATE_STOP_AT_ | F=37cm       | Obstacle Encounter -> STOP_AT_WALL | (  40.0cm,   -0.0cm, +360.0°) | F: 37cm, L: -1cm
+[16:28:50] STATE_CREEP_TO | F=37cm       | Obstacle Encounter -> CREEP_TO_SCAN | (  40.0cm,   -0.0cm, +360.0°) | F: 37cm, L: -1cm
+[16:28:50] MOVE_REVERSE   | +20.4 cm     | Advanced 20.4 cm (State: CREEP_TO_SCAN) | (  19.6cm,   -0.0cm, +360.0°) | F: 39cm, L: -1cm
+[16:28:50] HUMAN_DETECTED | *** ALERT *** | Target (wifi) HUMAN_POSSIBLE_BEHIN | (  19.6cm,   -0.0cm, +360.0°) | Map: (59cm, -0cm)
+[16:28:56] STATE_SCAN_ROT | F=39cm       | Obstacle Encounter -> SCAN_ROTATE | (  19.1cm,   -0.0cm, +360.0°) | F: 39cm, L: -1cm
+[16:29:06] STATE_CREEP_TO | F=26cm       | Obstacle Encounter -> CREEP_TO_SCAN | (  19.1cm,   -0.0cm, +360.0°) | F: 26cm, L: -1cm
+[16:29:07] MOVE_REVERSE   | +26.6 cm     | Advanced 26.6 cm (State: CREEP_TO_SCAN) | (  -7.0cm,    0.0cm, +360.0°) | F: 41cm, L: -1cm
+[16:29:14] MOVE_REVERSE   | +22.8 cm     | Advanced 22.8 cm (State: CREEP_TO_SCAN) | ( -29.8cm,    0.0cm, +360.0°) | F: 28cm, L: -1cm
+[16:29:15] STATE_SCAN_ROT | F=26cm       | Obstacle Encounter -> SCAN_ROTATE | ( -29.9cm,    0.0cm, +360.0°) | F: 26cm, L: -1cm
+[16:29:19] STATE_CREEP_TO | F=41cm       | Obstacle Encounter -> CREEP_TO_SCAN | ( -29.9cm,    0.0cm, +360.0°) | F: 41cm, L: -1cm
+[16:29:20] MOVE_REVERSE   | +22.2 cm     | Advanced 22.2 cm (State: CREEP_TO_SCAN) | ( -52.0cm,    0.0cm, +360.0°) | F: 39cm, L: -1cm
+[16:29:23] STATE_SCAN_ROT | F=43cm       | Obstacle Encounter -> SCAN_ROTATE | ( -65.2cm,    0.0cm, +360.0°) | F: 43cm, L: -1cm
+[16:29:32] STATE_STOP_AT_ | F=40cm       | Obstacle Encounter -> STOP_AT_WALL | ( -65.1cm,    0.0cm, +360.0°) | F: 40cm, L: -1cm
+[16:29:32] STATE_CREEP_TO | F=40cm       | Obstacle Encounter -> CREEP_TO_SCAN | ( -65.1cm,    0.0cm, +360.0°) | F: 40cm, L: -1cm
+[16:29:32] MOVE_REVERSE   | +24.9 cm     | Advanced 24.9 cm (State: CREEP_TO_SCAN) | ( -76.9cm,    0.0cm, +360.0°) | F: 40cm, L: -1cm
+[16:29:36] STATE_SCAN_ROT | F=43cm       | Obstacle Encounter -> SCAN_ROTATE | ( -91.0cm,    0.0cm, +360.0°) | F: 43cm, L: -1cm
+[16:29:45] STATE_CREEP_TO | F=5cm        | Obstacle Encounter -> CREEP_TO_SCAN | ( -91.0cm,    0.0cm, +360.0°) | F:  5cm, L: -1cm
+[16:29:45] MOVE_REVERSE   | +25.3 cm     | Advanced 25.3 cm (State: CREEP_TO_SCAN) | (-102.3cm,    0.0cm, +360.0°) | F:  5cm, L: -1cm
+[16:29:49] STATE_SCAN_ROT | F=5cm        | Obstacle Encounter -> SCAN_ROTATE | (-102.3cm,    0.0cm, +360.0°) | F:  5cm, L: -1cm
+[16:29:58] STATE_STOP_AT_ | F=11cm       | Obstacle Encounter -> STOP_AT_WALL | (-102.2cm,    0.0cm, +360.0°) | F: 11cm, L: -1cm
+[16:29:58] STATE_CREEP_TO | F=10cm       | Obstacle Encounter -> CREEP_TO_SCAN | (-102.2cm,    0.0cm, +360.0°) | F: 10cm, L: -1cm
+[16:29:58] MOVE_REVERSE   | +22.4 cm     | Advanced 22.4 cm (State: CREEP_TO_SCAN) | (-124.6cm,    0.0cm, +360.0°) | F: 10cm, L: -1cm
+[16:29:58] MOVE_REVERSE   | +23.1 cm     | Advanced 23.1 cm (State: CREEP_TO_SCAN) | (-147.8cm,    0.0cm, +360.0°) | F: 16cm, L: -1cm
+[16:30:01] STATE_SCAN_ROT | F=15cm       | Obstacle Encounter -> SCAN_ROTATE | (-147.8cm,    0.0cm, +360.0°) | F: 15cm, L: -1cm
+[16:30:10] STATE_STOP_AT_ | F=15cm       | Obstacle Encounter -> STOP_AT_WALL | (-147.3cm,    0.0cm, +360.0°) | F: 15cm, L: -1cm
+[16:30:10] STATE_CREEP_TO | F=30cm       | Obstacle Encounter -> CREEP_TO_SCAN | (-147.3cm,    0.0cm, +360.0°) | F: 30cm, L: -1cm
+[16:30:10] MOVE_REVERSE   | +23.5 cm     | Advanced 23.5 cm (State: CREEP_TO_SCAN) | (-171.2cm,    0.0cm, +360.0°) | F: 30cm, L: -1cm
+[16:30:14] STATE_SCAN_ROT | F=31cm       | Obstacle Encounter -> SCAN_ROTATE | (-185.4cm,    0.0cm, +360.0°) | F: 31cm, L: -1cm
+[16:30:22] STATE_STOP_AT_ | F=24cm       | Obstacle Encounter -> STOP_AT_WALL | (-184.9cm,    0.0cm, +360.0°) | F: 24cm, L: -1cm
+[16:30:22] STATE_CREEP_TO | F=24cm       | Obstacle Encounter -> CREEP_TO_SCAN | (-184.9cm,    0.0cm, +360.0°) | F: 24cm, L: -1cm
+[16:30:22] MOVE_REVERSE   | +27.6 cm     | Advanced 27.6 cm (State: CREEP_TO_SCAN) | (-198.8cm,    0.0cm, +360.0°) | F: 23cm, L: -1cm
+[16:30:26] STATE_SCAN_ROT | F=20cm       | Obstacle Encounter -> SCAN_ROTATE | (-198.8cm,    0.0cm, +360.0°) | F: 20cm, L: -1cm
+[16:30:34] STATE_STOP_AT_ | F=35cm       | Obstacle Encounter -> STOP_AT_WALL | (-198.3cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:30:34] STATE_CREEP_TO | F=35cm       | Obstacle Encounter -> CREEP_TO_SCAN | (-198.3cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:30:34] MOVE_REVERSE   | +23.0 cm     | Advanced 23.0 cm (State: CREEP_TO_SCAN) | (-221.8cm,    0.0cm, +360.0°) | F: 29cm, L: -1cm
+[16:30:38] STATE_SCAN_ROT | F=36cm       | Obstacle Encounter -> SCAN_ROTATE | (-235.1cm,    0.0cm, +360.0°) | F: 36cm, L: -1cm
+[16:30:46] STATE_STOP_AT_ | F=35cm       | Obstacle Encounter -> STOP_AT_WALL | (-233.2cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:30:46] STATE_CREEP_TO | F=35cm       | Obstacle Encounter -> CREEP_TO_SCAN | (-233.2cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:30:47] MOVE_REVERSE   | +22.8 cm     | Advanced 22.8 cm (State: CREEP_TO_SCAN) | (-244.6cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:30:51] MOVE_REVERSE   | +24.4 cm     | Advanced 24.4 cm (State: CREEP_TO_SCAN) | (-269.0cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:30:55] STATE_SCAN_ROT | F=35cm       | Obstacle Encounter -> SCAN_ROTATE | (-269.0cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:31:01] STATE_CREEP_TO | F=35cm       | Obstacle Encounter -> CREEP_TO_SCAN | (-269.0cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:31:05] STATE_SCAN_ROT | F=35cm       | Obstacle Encounter -> SCAN_ROTATE | (-282.0cm,    0.0cm, +360.0°) | F: 35cm, L: -1cm
+[16:31:26] STATE_STOP_AT_ | F=150cm      | Obstacle Encounter -> STOP_AT_WALL | (-271.1cm,    0.0cm, +360.0°) | F:150cm, L: -1cm
+[16:31:26] STATE_CREEP_TO | F=150cm      | Obstacle Encounter -> CREEP_TO_SCAN | (-271.1cm,    0.0cm, +360.0°) | F:150cm, L: -1cm
+[16:31:27] MOVE_FORWARD   | +22.9 cm     | Advanced 22.9 cm (State: CREEP_TO_SCAN) | (-246.1cm,    0.0cm, +360.0°) | F:109cm, L: -1cm
+[16:31:30] STATE_SCAN_ROT | F=150cm      | Obstacle Encounter -> SCAN_ROTATE | (-235.8cm,    0.0cm, +360.0°) | F:150cm, L: -1cm
+[16:31:38] MOVE_FORWARD   | +22.9 cm     | Advanced 22.9 cm (State: CRUISE) | (-223.2cm,    0.0cm, +360.0°) | F:149cm, L: -1cm
+[16:32:04] STATE_STOP_AT_ | F=155cm      | Obstacle Encounter -> STOP_AT_WALL | (-212.1cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:04] STATE_CREEP_TO | F=155cm      | Obstacle Encounter -> CREEP_TO_SCAN | (-212.1cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:04] MOVE_FORWARD   | +23.6 cm     | Advanced 23.6 cm (State: CREEP_TO_SCAN) | (-199.6cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:08] STATE_SCAN_ROT | F=155cm      | Obstacle Encounter -> SCAN_ROTATE | (-199.6cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:14] HUMAN_DETECTED | *** ALERT *** | Target (cv_fallen) [CV] HUMAN FALLEN de | (-199.6cm,    0.0cm, +360.0°) | Map: (-45cm, 0cm)
+[16:32:16] STATE_CREEP_TO | F=155cm      | Obstacle Encounter -> CREEP_TO_SCAN | (-199.6cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:20] STATE_SCAN_ROT | F=155cm      | Obstacle Encounter -> SCAN_ROTATE | (-186.5cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:23] STATE_CREEP_TO | F=90cm       | Obstacle Encounter -> CREEP_TO_SCAN | (-186.5cm,    0.0cm, +360.0°) | F: 90cm, L: -1cm
+[16:32:24] STATE_SCAN_ROT | F=92cm       | Obstacle Encounter -> SCAN_ROTATE | (-186.5cm,    0.0cm, +360.0°) | F: 92cm, L: -1cm
+[16:32:33] STATE_CREEP_TO | F=155cm      | Obstacle Encounter -> CREEP_TO_SCAN | (-186.5cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:33] MOVE_FORWARD   | +25.3 cm     | Advanced 25.3 cm (State: CREEP_TO_SCAN) | (-174.4cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:32:37] STATE_SCAN_ROT | F=155cm      | Obstacle Encounter -> SCAN_ROTATE | (-174.4cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:33:26] MOVE_FORWARD   | +26.8 cm     | Advanced 26.8 cm (State: CRUISE) | (-147.6cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:34:44] STATE_STOP_AT_ | F=155cm      | Obstacle Encounter -> STOP_AT_WALL | (-135.5cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:34:44] STATE_CREEP_TO | F=155cm      | Obstacle Encounter -> CREEP_TO_SCAN | (-135.5cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:34:44] MOVE_FORWARD   | +25.6 cm     | Advanced 25.6 cm (State: CREEP_TO_SCAN) | (-122.0cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:34:52] STATE_SCAN_ROT | F=155cm      | Obstacle Encounter -> SCAN_ROTATE | (-108.2cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:35:47] MOVE_FORWARD   | +26.2 cm     | Advanced 26.2 cm (State: CRUISE) | ( -95.8cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:35:59] MOVE_FORWARD   | +25.9 cm     | Advanced 25.9 cm (State: CRUISE) | ( -70.0cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:36:04] MOVE_FORWARD   | +22.2 cm     | Advanced 22.2 cm (State: CRUISE) | ( -47.8cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:36:20] MOVE_FORWARD   | +21.6 cm     | Advanced 21.6 cm (State: CRUISE) | ( -26.2cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:36:25] MOVE_FORWARD   | +20.6 cm     | Advanced 20.6 cm (State: CRUISE) | (  -5.6cm,    0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:36:31] MOVE_FORWARD   | +27.3 cm     | Advanced 27.3 cm (State: CRUISE) | (  21.7cm,   -0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:36:35] MOVE_FORWARD   | +24.2 cm     | Advanced 24.2 cm (State: CRUISE) | (  45.9cm,   -0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:36:43] MOVE_FORWARD   | +21.5 cm     | Advanced 21.5 cm (State: CRUISE) | (  67.4cm,   -0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:36:52] MOVE_FORWARD   | +21.5 cm     | Advanced 21.5 cm (State: CRUISE) | (  88.9cm,   -0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:37:06] MOVE_FORWARD   | +20.1 cm     | Advanced 20.1 cm (State: CRUISE) | ( 109.0cm,   -0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:37:13] MOVE_FORWARD   | +23.5 cm     | Advanced 23.5 cm (State: CRUISE) | ( 132.5cm,   -0.0cm, +360.0°) | F:154cm, L: -1cm
+[16:37:34] MOVE_FORWARD   | +20.6 cm     | Advanced 20.6 cm (State: CRUISE) | ( 153.1cm,   -0.0cm, +360.0°) | F:153cm, L: -1cm
+[16:37:41] MOVE_FORWARD   | +20.2 cm     | Advanced 20.2 cm (State: CRUISE) | ( 173.3cm,   -0.0cm, +360.0°) | F:153cm, L: -1cm
+[16:37:50] MOVE_FORWARD   | +20.3 cm     | Advanced 20.3 cm (State: CRUISE) | ( 193.6cm,   -0.0cm, +360.0°) | F:153cm, L: -1cm
+[16:37:59] MOVE_FORWARD   | +20.3 cm     | Advanced 20.3 cm (State: CRUISE) | ( 213.9cm,   -0.0cm, +360.0°) | F:154cm, L: -1cm
+[16:38:04] MOVE_FORWARD   | +28.8 cm     | Advanced 28.8 cm (State: CRUISE) | ( 242.7cm,   -0.0cm, +360.0°) | F:154cm, L: -1cm
+[16:38:08] STATE_STOP_AT_ | F=154cm      | Obstacle Encounter -> STOP_AT_WALL | ( 242.7cm,   -0.0cm, +360.0°) | F:154cm, L: -1cm
+[16:38:08] STATE_CREEP_TO | F=154cm      | Obstacle Encounter -> CREEP_TO_SCAN | ( 242.7cm,   -0.0cm, +360.0°) | F:154cm, L: -1cm
+[16:38:09] MOVE_FORWARD   | +22.3 cm     | Advanced 22.3 cm (State: CREEP_TO_SCAN) | ( 265.0cm,   -0.0cm, +360.0°) | F:152cm, L: -1cm
+[16:38:10] STATE_SCAN_ROT | F=90cm       | Obstacle Encounter -> SCAN_ROTATE | ( 265.0cm,   -0.0cm, +360.0°) | F: 90cm, L: -1cm
+[16:38:19] MOVE_FORWARD   | +20.0 cm     | Advanced 20.0 cm (State: CRUISE) | ( 285.1cm,   -0.0cm, +360.0°) | F:155cm, L: -1cm
+[16:38:42] STATE_STOP_AT_ | F=153cm      | Obstacle Encounter -> STOP_AT_WALL | ( 285.1cm,   -0.0cm, +360.0°) | F:153cm, L: -1cm
+[16:38:42] STATE_CREEP_TO | F=153cm      | Obstacle Encounter -> CREEP_TO_SCAN | ( 285.1cm,   -0.0cm, +360.0°) | F:153cm, L: -1cm
+[16:38:43] STATE_SCAN_ROT | F=66cm       | Obstacle Encounter -> SCAN_ROTATE | ( 298.2cm,   -0.0cm, +360.0°) | F: 66cm, L: -1cm
+[16:38:51] STATE_STOP_AT_ | F=64cm       | Obstacle Encounter -> STOP_AT_WALL | ( 298.3cm,   -0.0cm, +360.0°) | F: 64cm, L: -1cm
+[16:38:51] STATE_CREEP_TO | F=64cm       | Obstacle Encounter -> CREEP_TO_SCAN | ( 298.3cm,   -0.0cm, +360.0°) | F: 64cm, L: -1cm
+[16:38:52] STATE_SCAN_ROT | F=64cm       | Obstacle Encounter -> SCAN_ROTATE | ( 298.3cm,   -0.0cm, +360.0°) | F: 64cm, L: -1cm
+[16:39:01] MOVE_FORWARD   | +25.0 cm     | Advanced 25.0 cm (State: CRUISE) | ( 310.1cm,   -0.0cm, +360.0°) | F:153cm, L: -1cm
+[16:40:01] MOVE_FORWARD   | +22.1 cm     | Advanced 22.1 cm (State: CRUISE) | ( 332.1cm,   -0.0cm, +360.0°) | F:154cm, L: -1cm
+[16:40:07] MOVE_FORWARD   | +26.1 cm     | Advanced 26.1 cm (State: CRUISE) | ( 358.2cm,   -0.0cm, +360.0°) | F:152cm, L: -1cm
+[16:40:18] MOVE_FORWARD   | +20.6 cm     | Advanced 20.6 cm (State: CRUISE) | ( 378.8cm,   -0.1cm, +360.0°) | F:154cm, L: -1cm
+[16:40:23] MOVE_FORWARD   | +24.6 cm     | Advanced 24.6 cm (State: CRUISE) | ( 403.4cm,   -0.1cm, +360.0°) | F:152cm, L: -1cm
+[16:40:27] MOVE_FORWARD   | +22.1 cm     | Advanced 22.1 cm (State: CRUISE) | ( 425.5cm,   -0.1cm, +360.0°) | F:153cm, L: -1cm
